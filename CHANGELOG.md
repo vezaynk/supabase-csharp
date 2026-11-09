@@ -1,5 +1,17 @@
 # Changelog
 
+## [8.11.0](https://github.com/supabase/supabase-csharp/compare/v8.10.0...v8.11.0) (2026-11-09)
+
+
+### Features
+
+* **gotrue:** send the PKCE code challenge on resend ([#685](https://github.com/supabase/supabase-csharp/issues/685)) ([bddbc62](https://github.com/supabase/supabase-csharp/commit/bddbc62534b169c9982104bc156951cfba2f60be))
+
+
+### Bug Fixes
+
+* **realtime:** keep receiving when a frame cannot be decoded ([#683](https://github.com/supabase/supabase-csharp/issues/683)) ([6abb83c](https://github.com/supabase/supabase-csharp/commit/6abb83c8d5f344cfb2a524a6fc774fcc635ce3fc))
+
 ## [8.10.0](https://github.com/supabase/supabase-csharp/compare/v8.9.0...v8.10.0) (2026-11-09)
 
 
