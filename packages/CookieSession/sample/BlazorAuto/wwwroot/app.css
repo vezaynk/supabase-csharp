@@ -1,0 +1,62 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", sans-serif;
+  background: #f4f1ea;
+  color: #1d1a16;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+h1 {
+  font-size: 1.8rem;
+  margin-bottom: 0.25rem;
+}
+
+.lede, .mode, .error {
+  line-height: 1.45;
+}
+
+.mode {
+  color: #5c564c;
+}
+
+form, .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+}
+
+input, button {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+}
+
+button {
+  background: #1d1a16;
+  color: #f4f1ea;
+  border: 0;
+}
+
+.error {
+  color: #8d2a2a;
+}
+
+ul {
+  padding-left: 1.2rem;
+}

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Supabase.CookieSession</RootNamespace>
+    <AssemblyName>Supabase.CookieSession</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Supabase.CookieSession.Abstractions\Supabase.CookieSession.Abstractions.csproj" />
+    <ProjectReference Include="..\Supabase.CookieSession.Client\Supabase.CookieSession.Client.csproj" />
+    <ProjectReference Include="..\..\Gotrue\Gotrue\Gotrue.csproj" />
+  </ItemGroup>
+</Project>

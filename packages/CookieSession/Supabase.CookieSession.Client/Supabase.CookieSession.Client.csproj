@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Supabase.CookieSession</RootNamespace>
+    <AssemblyName>Supabase.CookieSession.Client</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.Web" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Supabase.CookieSession.Abstractions\Supabase.CookieSession.Abstractions.csproj" />
+    <ProjectReference Include="..\..\Supabase\Supabase\Supabase.csproj" />
+    <ProjectReference Include="..\..\Postgrest\Postgrest\Postgrest.csproj" />
+    <ProjectReference Include="..\..\Realtime\Realtime\Realtime.csproj" />
+  </ItemGroup>
+</Project>

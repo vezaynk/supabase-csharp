@@ -1,0 +1,28 @@
+@using Microsoft.AspNetCore.Antiforgery
+@using Supabase.CookieSession
+@inject IAntiforgery Antiforgery
+@inject IHttpContextAccessor HttpContextAccessor
+@inject CookieSessionOptions Options
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    @if (this.HttpContextAccessor.HttpContext is { } http)
+    {
+        var tokens = Antiforgery.GetAndStoreTokens(http);
+        <meta name="csrf-token" content="@tokens.RequestToken" />
+    }
+    <script id="cookie-session-public" type="application/json">@((MarkupString)PublicConfigJson.Serialize(Options))</script>
+    <link rel="stylesheet" href="@Assets["app.css"]" />
+    <ImportMap />
+    <HeadOutlet />
+</head>
+<body>
+    <Routes />
+    <script src="@Assets["cookie-session.js"]"></script>
+    <script src="@Assets["_framework/blazor.web.js"]"></script>
+</body>
+</html>
