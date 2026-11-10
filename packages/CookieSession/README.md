@@ -24,12 +24,16 @@ A refresh is successful only after `Set-Cookie` is written. If GoTrue rotates th
 
 | Mode | Access token | Refresh cookie | Database | Realtime |
 | --- | --- | --- | --- | --- |
-| Static SSR, response not flushed | Redeemed on that request and kept for the request | Rotated on that response | SDK Postgrest from the server, user JWT | Not started |
-| Prerender of an interactive page | Not redeemed (no JS, and the circuit cannot `Set-Cookie`) | Untouched | Waits until interactive | Not started |
-| Interactive Server | Browser calls `POST /auth/session/token`, then JS passes the access token into the circuit | Stays in the browser. The circuit never receives it | SDK Postgrest from the server | Native SDK `ClientWebSocket` from the server to Supabase (`sdk-server-websocket`) |
+| Static SSR (`/static`) | Redeemed in middleware for that request, then discarded with the request | Rotated on that response, before the endpoint writes the body | SDK Postgrest from the server, user JWT. Profile and notes are in the HTML | Not started |
+| Prerender of InteractiveAuto (`/`) and InteractiveServer (`/server`) | Same request-scoped redeem. No JS. The circuit does not share this instance | Rotated on that document response. A started response refuses `Set-Cookie` and renders signed out | Same: profile and notes are in the first HTML | Not started. The refresh loop and socket start only after `RendererInfo.IsInteractive` |
+| Interactive Server, after the circuit starts | Browser calls `POST /auth/session/token` because the prerender scope is gone, then JS passes the access token into the new circuit | The cookie from the document response. This is a second redeem, not a second copy of the prerender memory | SDK Postgrest from the server | Native SDK `ClientWebSocket` from the server to Supabase (`sdk-server-websocket`) |
 | WASM, including Auto after the handoff | Same endpoint. The access token stays in JS and WASM memory | HttpOnly, so JS cannot read it | SDK Postgrest from the browser | Native SDK `ClientWebSocket` from the browser to Supabase (`sdk-browser-websocket`) |
 
 Interactive Auto starts on the server circuit and then moves to WASM. The server socket is disposed with the circuit. The browser opens its own SDK socket. That is two native connections over the lifetime of the page, not a relay.
+
+Document requests (`/`, `/server`, `/static`) run `UsePrerenderSession` before the Razor endpoint. The refresh cookie is redeemed there, `Set-Cookie` is appended, and only then does the page render. The access token stays in that HTTP request's scope. These pages do not enable streaming rendering. If a response has already started, the middleware does not write a cookie and the HTML stays signed out.
+
+The interactive circuit is a new scope. It does not see the prerender access token. Its first `EnsureAsync` asks the browser to call `/auth/session/token`, which redeems the cookie the document response just stored. That is a second refresh of the same visit. WASM on the same page can then reuse the access token held in the JS module if it is still inside the skew, so the handoff does not have to redeem a third time.
 
 ## Rotation, and the races that remain
 
@@ -60,7 +64,7 @@ Open `http://127.0.0.1:5288`. `SecureCookies` is false in the sample `appsetting
 
 The anon key is public and is embedded in the host page so WASM can construct the SDK client. The refresh token is not embedded.
 
-No live project was configured in this run. Sign-in against a real GoTrue was not exercised here.
+Sign-in in the tests and the browser smoke used a local fake GoTrue, not a hosted Supabase project.
 
 ## API
 
@@ -77,6 +81,7 @@ builder.Services.AddCookieSession(options =>
     options.AnonKey = "sb_publishable_or_anon_key";
     options.SecureCookies = false; // true on HTTPS
 });
+app.UsePrerenderSession();
 app.MapCookieSessionEndpoints();
 ```
 
@@ -116,7 +121,7 @@ Command:
 dotnet test packages/CookieSession/Supabase.CookieSession.Tests/Supabase.CookieSession.Tests.csproj
 ```
 
-This run: **24 passed, 0 failed, 0 skipped** (Release, net10.0). The sample project builds. With no Supabase URL configured, `GET /` returned 200 and the prerendered sign-in form, a CSRF meta tag, and a public config script with empty `url` and `anonKey`. That HTML contained no access or refresh token. No test called a live Supabase project. `LiveSupabase_IsOptInAndWasNotRun` returns immediately unless `COOKIE_SESSION_LIVE_URL` is set, and even then it does not dial out.
+This run: **35 passed, 0 failed** (Release, net10.0). No test called a live Supabase project. `LiveSupabase_IsOptInAndWasNotRun` returns immediately unless `COOKIE_SESSION_LIVE_URL` is set, and even then it does not dial out.
 
 Covered with fakes and the real SDK client:
 
@@ -129,6 +134,9 @@ Covered with fakes and the real SDK client:
 - The real Realtime client, on an in-memory socket: join carries the access token, `SetAuth` pushes `access_token` to the joined channel, reconnect rejoin carries the new token and not the old one, the socket URL is the configured Supabase host (not this app), a second client does not see the first user's token, `access_token` frames are not delivered to the page callback, sign-out stops the socket, duplicate `Subscribe` keeps one channel.
 - Postgrest `Get` sends `Authorization: Bearer <user access token>` and `apikey` set to the publishable key.
 - The JS file uses Web Locks and does not reference `localStorage`, `sessionStorage`, or `indexedDB`.
+- Sample prerender against an in-process fake GoTrue and PostgREST: `GET /` (InteractiveAuto), `GET /server` (InteractiveServer), and `GET /static` with a real encrypted refresh cookie return the user email and `seed-note-a`, one refresh call, one notes call with that user's access token, and an HttpOnly `Set-Cookie` that does not contain the refresh token. Anonymous HTML is the sign-in form and does not call GoTrue. A corrupt cookie and a rejected refresh render the sign-in form and clear the cookie. A transient refresh failure leaves the cookie in place. A later `POST /auth/session/token` redeems the rotated cookie. Two browsers do not see each other's notes. A response that has already started does not rotate.
+
+Headless Chrome, same fake, not a live Supabase project: after sign-in, loading `/` and `/server` showed `a@example.test` and `seed-note-a` once the Blazor circuit was interactive (`sdk-server-websocket`, WebSocket to `/_blazor`). A clean Auto load stayed on that server circuit for 12 seconds; `/auth/session/token` during that load returned 200. A later load reached `sdk-browser-websocket` and then showed `token request failed`. That WASM handoff was not a clean success. Native Supabase Realtime from the browser was not opened.
 
 Not run:
 

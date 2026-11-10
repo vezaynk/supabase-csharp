@@ -10,13 +10,15 @@ public sealed class HybridCookieSession : ICookieSession, IAsyncDisposable
     private readonly BrowserCookieSession browser;
     private readonly RefreshAuthority authority;
     private readonly CookieJar jar;
+    private readonly RequestSession request;
     private readonly IHttpContextAccessor http;
 
-    public HybridCookieSession(BrowserCookieSession browser, RefreshAuthority authority, CookieJar jar, IHttpContextAccessor http)
+    public HybridCookieSession(BrowserCookieSession browser, RefreshAuthority authority, CookieJar jar, RequestSession request, IHttpContextAccessor http)
     {
         this.browser = browser;
         this.authority = authority;
         this.jar = jar;
+        this.request = request;
         this.http = http;
     }
 
@@ -39,11 +41,75 @@ public sealed class HybridCookieSession : ICookieSession, IAsyncDisposable
 
     public Task EnsureAsync(CancellationToken cancellationToken = default)
     {
+        if (this.request.Attempted)
+            return this.ApplyPreparedAsync(cancellationToken);
         if (this.browser.HasAccessToken && this.browser.TimeUntilRefresh(DateTimeOffset.UtcNow) > TimeSpan.Zero)
             return Task.CompletedTask;
         if (this.Writable(out var http))
             return this.RedeemOnRequestAsync(http, cancellationToken);
         return this.browser.EnsureAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Redeems the refresh cookie for this document request and writes <c>Set-Cookie</c>
+    /// before the caller renders. A second call in the same request does not redeem again.
+    /// </summary>
+    public async Task EstablishAsync(HttpContext http, CancellationToken cancellationToken = default)
+    {
+        if (this.request.Attempted)
+            return;
+        if (http.Response.HasStarted)
+        {
+            this.request.MarkAnonymous();
+            return;
+        }
+
+        if (!this.jar.HasCookie(http.Request))
+        {
+            this.request.MarkAnonymous();
+            return;
+        }
+
+        var cookie = this.jar.Read(http.Request);
+        if (cookie is null || this.jar.IsRevoked(cookie.SessionId))
+        {
+            this.jar.Clear(http.Response, cookie?.SessionId);
+            this.request.MarkAnonymous();
+            return;
+        }
+
+        try
+        {
+            var grant = await this.authority.RedeemAsync(cookie, (next, _) =>
+            {
+                if (http.Response.HasStarted)
+                    return Task.FromResult(CookieWriteResult.Rejected);
+                return Task.FromResult(this.jar.TryWrite(http.Response, next));
+            }, cancellationToken).ConfigureAwait(false);
+            await this.AdoptAsync(grant, cancellationToken).ConfigureAwait(false);
+        }
+        catch (CookieSessionException exception) when (exception.Reauthenticate)
+        {
+            if (!http.Response.HasStarted && this.jar.StillCurrent(cookie.SessionId, cookie.Generation))
+            {
+                this.jar.Clear(http.Response, cookie.SessionId);
+                this.authority.Forget(cookie.SessionId);
+            }
+
+            this.request.MarkAnonymous();
+        }
+        catch (CookieSessionException)
+        {
+            this.request.MarkAnonymous();
+        }
+    }
+
+    /// <summary>The response already started, so this request stays signed out and does not rotate.</summary>
+    public Task NoteResponseStartedAsync()
+    {
+        if (!this.request.Attempted)
+            this.request.MarkAnonymous();
+        return Task.CompletedTask;
     }
 
     public Task RotateAsync(CancellationToken cancellationToken = default)
@@ -66,8 +132,13 @@ public sealed class HybridCookieSession : ICookieSession, IAsyncDisposable
         await this.browser.SignOutAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public Task<IReadOnlyList<NoteRow>> GetNotesAsync(CancellationToken cancellationToken = default) =>
-        this.browser.GetNotesAsync(cancellationToken);
+    public async Task<IReadOnlyList<NoteRow>> GetNotesAsync(CancellationToken cancellationToken = default)
+    {
+        await this.EnsureAsync(cancellationToken).ConfigureAwait(false);
+        if (!this.HasAccessToken)
+            return Array.Empty<NoteRow>();
+        return await this.browser.GetNotesAsync(cancellationToken).ConfigureAwait(false);
+    }
 
     public Task<ISdkSubscription> SubscribeAsync(string topic, Func<string, Task> onEvent, CancellationToken cancellationToken = default) =>
         this.browser.SubscribeAsync(topic, onEvent, cancellationToken);
@@ -102,11 +173,25 @@ public sealed class HybridCookieSession : ICookieSession, IAsyncDisposable
         await this.InstallAsync(grant, cancellationToken).ConfigureAwait(false);
     }
 
-    private Task InstallAsync(AccessGrant grant, CancellationToken cancellationToken) =>
-        this.browser.InstallAsync(grant.AccessToken, new SessionProfile
+    private Task ApplyPreparedAsync(CancellationToken cancellationToken)
+    {
+        if (this.request.AccessToken is null || this.request.Profile is null || this.browser.HasAccessToken)
+            return Task.CompletedTask;
+        return this.browser.InstallAsync(this.request.AccessToken, this.request.Profile, cancellationToken);
+    }
+
+    private Task AdoptAsync(AccessGrant grant, CancellationToken cancellationToken)
+    {
+        var profile = new SessionProfile
         {
             UserId = grant.User.Id,
             Email = grant.User.Email,
             ExpiresAt = grant.ExpiresAt,
-        }, cancellationToken);
+        };
+        this.request.Adopt(grant.AccessToken, profile);
+        return this.browser.InstallAsync(grant.AccessToken, profile, cancellationToken);
+    }
+
+    private Task InstallAsync(AccessGrant grant, CancellationToken cancellationToken) =>
+        this.AdoptAsync(grant, cancellationToken);
 }

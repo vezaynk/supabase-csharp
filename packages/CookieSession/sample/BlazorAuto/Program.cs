@@ -36,6 +36,7 @@ else
 
 app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
 app.UseAntiforgery();
+app.UsePrerenderSession();
 app.MapCookieSessionEndpoints();
 app.MapStaticAssets();
 app.MapRazorComponents<App>()
@@ -44,6 +45,11 @@ app.MapRazorComponents<App>()
     .AddAdditionalAssemblies(typeof(BlazorAuto.Client._Imports).Assembly);
 
 app.Run();
+
+/// <summary>Entry point marker so tests can host this app.</summary>
+public partial class Program
+{
+}
 
 /// <summary>JSON embedded in the host page. Public project coordinates only.</summary>
 public static class PublicConfigJson

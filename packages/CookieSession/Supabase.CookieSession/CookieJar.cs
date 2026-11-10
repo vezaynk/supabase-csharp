@@ -65,6 +65,9 @@ public sealed class CookieJar
         }
     }
 
+    public bool HasCookie(HttpRequest request) =>
+        request.Cookies.ContainsKey(this.options.CookieName) || request.Cookies.ContainsKey(this.CountName);
+
     public RefreshCookie? Read(HttpRequest request)
     {
         var countText = request.Cookies[this.CountName];

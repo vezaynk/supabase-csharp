@@ -1,0 +1,206 @@
+@inject ICookieSession Session
+@implements IDisposable
+
+<h1>Cookie session</h1>
+<p class="lede">Access tokens stay in memory. Refresh tokens stay in an HttpOnly cookie.</p>
+<p class="mode">Interactive: @Interactive. Realtime: @(Interactive ? Session.RealtimeTransport : "not started until interactive").</p>
+
+@if (!string.IsNullOrEmpty(error))
+{
+    <p class="error">@error</p>
+}
+
+@if (Session.Profile is null)
+{
+    <EditForm Model="form" OnValidSubmit="SignIn" FormName="@FormName">
+        <label>Email <InputText @bind-Value="form.Email" /></label>
+        <label>Password <InputText @bind-Value="form.Password" type="password" /></label>
+        <button type="submit">Sign in</button>
+    </EditForm>
+}
+else
+{
+    <p class="profile">@Session.Profile.Email (@Session.Profile.UserId)</p>
+    <p>Access token is in memory until @Session.Profile.ExpiresAt.ToString("u"). It is not written to localStorage.</p>
+    <div class="actions">
+        @if (Interactive)
+        {
+            <button @onclick="LoadNotes">Load notes</button>
+            <button @onclick="Subscribe">Subscribe</button>
+            <button @onclick="Rotate">Rotate</button>
+        }
+        <button @onclick="SignOut">Sign out</button>
+    </div>
+    <ul class="notes">
+        @foreach (var note in notes)
+        {
+            <li>@note.Id: @note.Body</li>
+        }
+    </ul>
+    <ul>
+        @foreach (var item in events)
+        {
+            <li>@item</li>
+        }
+    </ul>
+}
+
+@code {
+    private readonly SignInForm form = new();
+    private readonly List<NoteRow> notes = [];
+    private readonly List<string> events = [];
+    private string? error;
+    private CancellationTokenSource? loop;
+    private ISdkSubscription? subscription;
+
+    [Parameter]
+    public bool Interactive { get; set; }
+
+    [Parameter]
+    public string FormName { get; set; } = "sign-in";
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            await this.Session.EnsureAsync();
+            if (this.Session.Profile is not null)
+                this.notes.AddRange(await this.Session.GetNotesAsync());
+        }
+        catch (CookieSessionException ex) when (ex.Reauthenticate)
+        {
+            this.error = null;
+        }
+        catch (CookieSessionException ex)
+        {
+            this.error = ex.Message;
+        }
+
+        if (!this.Interactive)
+            return;
+
+        this.StartLoop();
+    }
+
+    private async Task SignIn()
+    {
+        this.error = null;
+        try
+        {
+            await this.Session.SignInAsync(this.form.Email, this.form.Password);
+            this.notes.Clear();
+            this.notes.AddRange(await this.Session.GetNotesAsync());
+            if (this.Interactive)
+                this.StartLoop();
+        }
+        catch (CookieSessionException ex)
+        {
+            this.error = ex.Message;
+        }
+    }
+
+    private async Task LoadNotes()
+    {
+        this.error = null;
+        try
+        {
+            this.notes.Clear();
+            this.notes.AddRange(await this.Session.GetNotesAsync());
+        }
+        catch (Exception ex)
+        {
+            this.error = ex.Message;
+        }
+    }
+
+    private async Task Subscribe()
+    {
+        if (!this.Interactive)
+            return;
+        this.error = null;
+        try
+        {
+            this.subscription ??= await this.Session.SubscribeAsync("notes", message =>
+            {
+                this.events.Add(message);
+                return this.InvokeAsync(this.StateHasChanged);
+            });
+            this.events.Add("joined notes via " + this.subscription.Transport);
+        }
+        catch (Exception ex)
+        {
+            this.error = ex.Message;
+        }
+    }
+
+    private async Task Rotate()
+    {
+        this.error = null;
+        try
+        {
+            await this.Session.RotateAsync();
+        }
+        catch (CookieSessionException ex)
+        {
+            this.error = ex.Message;
+        }
+    }
+
+    private async Task SignOut()
+    {
+        if (this.subscription is not null)
+            await this.subscription.DisposeAsync();
+        this.subscription = null;
+        await this.Session.SignOutAsync();
+        this.notes.Clear();
+        this.events.Clear();
+        this.loop?.Cancel();
+    }
+
+    private void StartLoop()
+    {
+        this.loop?.Cancel();
+        this.loop = new CancellationTokenSource();
+        _ = this.RefreshLoop(this.loop.Token);
+    }
+
+    private async Task RefreshLoop(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var delay = this.Session.TimeUntilRefresh(DateTimeOffset.UtcNow);
+            if (delay is null)
+                return;
+            try
+            {
+                await Task.Delay(delay.Value, cancellationToken);
+                await this.Session.RotateAsync(cancellationToken);
+                await this.InvokeAsync(this.StateHasChanged);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (CookieSessionException ex)
+            {
+                this.error = ex.Message;
+                await this.InvokeAsync(this.StateHasChanged);
+                return;
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        this.loop?.Cancel();
+        this.loop?.Dispose();
+        _ = this.subscription?.DisposeAsync();
+    }
+
+    private sealed class SignInForm
+    {
+        public string Email { get; set; } = "";
+
+        public string Password { get; set; } = "";
+    }
+}

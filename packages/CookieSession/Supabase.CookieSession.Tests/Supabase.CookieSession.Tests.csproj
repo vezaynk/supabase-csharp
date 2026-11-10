@@ -12,6 +12,7 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="FluentAssertions" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="MSTest.TestAdapter" />
     <PackageReference Include="MSTest.TestFramework" />
@@ -24,5 +25,6 @@
   <ItemGroup>
     <ProjectReference Include="..\Supabase.CookieSession\Supabase.CookieSession.csproj" />
     <ProjectReference Include="..\Supabase.CookieSession.Client\Supabase.CookieSession.Client.csproj" />
+    <ProjectReference Include="..\sample\BlazorAuto\BlazorAuto.csproj" />
   </ItemGroup>
 </Project>
