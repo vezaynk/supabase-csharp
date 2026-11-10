@@ -1,0 +1,419 @@
+@inject ICookieSession Session
+@inject PersistentComponentState PersistentState
+@implements IDisposable
+
+<article class="session" data-watch="@(this.watching ? "on" : "off")">
+    <header class="session-head">
+        <div>
+            <h1>Cookie session</h1>
+            <p class="lede">Access tokens stay in memory. Refresh tokens stay in an HttpOnly cookie.</p>
+        </div>
+        <div class="status">
+            <span class="pill" data-runtime="@this.RuntimeLabel">@this.RuntimeLabel</span>
+            <span class="pill @(this.Interactive ? "live" : "")" data-realtime="@this.RealtimeLabel">@this.RealtimeLabel</span>
+        </div>
+    </header>
+
+    @if (!string.IsNullOrEmpty(this.error))
+    {
+        <p class="error" data-error>@this.error</p>
+    }
+
+    @if (this.RestoredProfile is null)
+    {
+        <div data-signin>
+            <EditForm Model="this.form" OnValidSubmit="this.SignIn" FormName="@this.FormName">
+                <label>Email <InputText @bind-Value="this.form.Email" /></label>
+                <label>Password <InputText @bind-Value="this.form.Password" type="password" /></label>
+                <button type="submit">Sign in</button>
+            </EditForm>
+        </div>
+    }
+    else
+    {
+        <section data-profile>
+            <p class="profile">@this.RestoredProfile.Email (@this.RestoredProfile.UserId)</p>
+            <p class="expiry">Signed in until @this.RestoredProfile.ExpiresAt.ToString("u"). The access token stays in memory and is not written to localStorage.</p>
+            <div class="actions">
+                <button type="button" disabled="@(!this.Interactive)" @onclick="this.LoadNotes">Load notes</button>
+                <button type="button" disabled="@(!this.Interactive)" @onclick="this.Subscribe">Subscribe</button>
+                <button type="button" disabled="@(!this.Interactive || this.rotating)" @onclick="this.Rotate">Rotate</button>
+                @if (this.Page == "static")
+                {
+                    <form method="post" action="/auth/session/signout" data-static-signout onsubmit="if (window.cookieSession) cookieSession.notifySignedOut()">
+                        <input type="hidden" name="__RequestVerificationToken" value="@this.AntiforgeryToken" />
+                        <input type="hidden" name="returnUrl" value="/static" />
+                        <button type="submit">Sign out</button>
+                    </form>
+                }
+                else
+                {
+                    <button type="button" @onclick="this.SignOut">Sign out</button>
+                }
+            </div>
+            <ul class="notes" data-notes>
+                @foreach (var note in this.notes)
+                {
+                    <li data-note="@note.Id">@note.Id: @note.Body</li>
+                }
+            </ul>
+            <ul class="events" data-events>
+                @if (this.events.Count == 0)
+                {
+                    <li class="quiet">Channel quiet</li>
+                }
+                else
+                {
+                    @foreach (var item in this.events)
+                    {
+                        <li>@item</li>
+                    }
+                }
+            </ul>
+        </section>
+    }
+</article>
+
+@code {
+    private readonly SignInForm form = new();
+    private readonly List<NoteRow> notes = [];
+    private readonly List<string> events = [];
+    private string? error;
+    private string realtimeDetail = "Idle";
+    private bool rotating;
+    private bool connecting;
+    private bool watching;
+    private CancellationTokenSource? loop;
+    private ISdkSubscription? subscription;
+
+    [Parameter]
+    public bool Interactive { get; set; }
+
+    [Parameter]
+    public string Page { get; set; } = "static";
+
+    [Parameter]
+    public string FormName { get; set; } = "sign-in";
+
+    [CascadingParameter(Name = "AntiforgeryRequestToken")]
+    public string? AntiforgeryToken { get; set; }
+
+    /// <summary>Profile from prerender. No access token and no refresh token.</summary>
+    private SessionProfile? RestoredProfile { get; set; }
+
+    /// <summary>Notes from prerender. No access token and no refresh token.</summary>
+    private List<NoteRow>? RestoredNotes { get; set; }
+
+    private PersistingComponentStateSubscription persistServer;
+    private PersistingComponentStateSubscription persistWasm;
+
+    private string RuntimeLabel
+    {
+        get
+        {
+            if (!this.Interactive)
+                return this.Page == "static" ? "Static" : "Prerender";
+            return OperatingSystem.IsBrowser() ? "WebAssembly" : "Server";
+        }
+    }
+
+    private string RealtimeLabel => this.Interactive ? this.realtimeDetail : "not started until interactive";
+
+    protected override void OnInitialized()
+    {
+        this.Session.SessionEnded += this.OnRemoteSignOut;
+        this.RestoreView();
+        this.RegisterPersist();
+        this.CopyRestoredNotes();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || !this.Interactive || this.watching)
+            return;
+        this.watching = true;
+        await this.Session.WatchSignOutAsync();
+        await this.InvokeAsync(this.StateHasChanged);
+    }
+
+    private void OnRemoteSignOut() => _ = this.InvokeAsync(() =>
+    {
+        this.ApplySignedOut();
+        this.StateHasChanged();
+    });
+
+    private void RestoreView()
+    {
+        if (!this.PersistentState.TryTakeFromJson<ViewState>(this.StateKey, out var view) || view is null)
+            return;
+        this.RestoredProfile = view.Profile;
+        this.RestoredNotes = view.Notes;
+    }
+
+    private void RegisterPersist()
+    {
+        if (this.Page == "server")
+            this.persistServer = this.PersistentState.RegisterOnPersisting(this.Persist, RenderMode.InteractiveServer);
+        else if (this.Page == "auto")
+        {
+            this.persistServer = this.PersistentState.RegisterOnPersisting(this.Persist, RenderMode.InteractiveServer);
+            this.persistWasm = this.PersistentState.RegisterOnPersisting(this.Persist, RenderMode.InteractiveWebAssembly);
+        }
+    }
+
+    private Task Persist()
+    {
+        this.PersistentState.PersistAsJson(this.StateKey, new ViewState
+        {
+            Profile = this.RestoredProfile,
+            Notes = this.RestoredNotes ?? this.notes.ToList(),
+        });
+        return Task.CompletedTask;
+    }
+
+    private string StateKey => "cookie-session-view-" + this.Page;
+
+    protected override void OnParametersSet()
+    {
+        if (this.Interactive && this.RestoredProfile is not null)
+            this.BeginInteractive();
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        this.CopyRestoredNotes();
+        if (this.RestoredProfile is not null)
+            return;
+
+        try
+        {
+            await this.Session.EnsureAsync();
+        }
+        catch (CookieSessionException ex) when (ex.Reauthenticate)
+        {
+            this.error = null;
+            return;
+        }
+        catch (CookieSessionException ex)
+        {
+            this.error = ex.Message;
+            return;
+        }
+
+        if (this.Session.Profile is null)
+            return;
+
+        this.RestoredProfile = this.CopyProfile(this.Session.Profile);
+        try
+        {
+            var loaded = await this.Session.GetNotesAsync();
+            this.notes.AddRange(loaded);
+            this.RestoredNotes = this.notes.ToList();
+        }
+        catch (Exception ex)
+        {
+            this.error = ex.Message;
+        }
+
+        this.BeginInteractive();
+    }
+
+    private void CopyRestoredNotes()
+    {
+        if (this.notes.Count == 0 && this.RestoredNotes is not null)
+            this.notes.AddRange(this.RestoredNotes);
+    }
+
+    private void BeginInteractive()
+    {
+        if (!this.Interactive || this.connecting)
+            return;
+        this.connecting = true;
+        _ = this.ConnectAsync();
+    }
+
+    private async Task ConnectAsync()
+    {
+        this.realtimeDetail = "Connecting";
+        await this.InvokeAsync(this.StateHasChanged);
+        try
+        {
+            await this.Session.EnsureAsync();
+            if (this.Session.Profile is not null && this.RestoredProfile is not null)
+                this.RestoredProfile.ExpiresAt = this.Session.Profile.ExpiresAt;
+            this.StartLoop();
+            this.subscription ??= await this.Session.SubscribeAsync("notes", message =>
+            {
+                if (message is "phx_reply" or "phx_close" or "heartbeat")
+                    return Task.CompletedTask;
+                this.events.Add(message);
+                return this.InvokeAsync(this.StateHasChanged);
+            });
+            this.events.Add("joined notes via " + this.subscription.Transport);
+            this.realtimeDetail = "Open · " + this.subscription.Transport;
+        }
+        catch (CookieSessionException ex) when (ex.Reauthenticate)
+        {
+            this.RestoredProfile = null;
+            this.RestoredNotes = null;
+            this.notes.Clear();
+            this.error = null;
+            this.realtimeDetail = "Idle";
+        }
+        catch (Exception ex)
+        {
+            this.error = ex.Message;
+            this.realtimeDetail = "Interrupted";
+        }
+
+        await this.InvokeAsync(this.StateHasChanged);
+    }
+
+    private async Task SignIn()
+    {
+        this.error = null;
+        try
+        {
+            await this.Session.SignInAsync(this.form.Email, this.form.Password);
+            this.notes.Clear();
+            this.events.Clear();
+            this.notes.AddRange(await this.Session.GetNotesAsync());
+            this.RestoredProfile = this.Session.Profile is null ? null : this.CopyProfile(this.Session.Profile);
+            this.RestoredNotes = this.notes.ToList();
+            this.BeginInteractive();
+        }
+        catch (CookieSessionException ex)
+        {
+            this.error = ex.Message;
+        }
+    }
+
+    private async Task LoadNotes()
+    {
+        this.error = null;
+        try
+        {
+            var loaded = await this.Session.GetNotesAsync();
+            this.notes.Clear();
+            this.notes.AddRange(loaded);
+            this.RestoredNotes = this.notes.ToList();
+        }
+        catch (Exception ex)
+        {
+            this.error = ex.Message;
+        }
+    }
+
+    private async Task Subscribe()
+    {
+        if (!this.Interactive || this.subscription is not null)
+            return;
+        await this.ConnectAsync();
+    }
+
+    private async Task Rotate()
+    {
+        this.error = null;
+        this.rotating = true;
+        try
+        {
+            await this.Session.RotateAsync();
+            if (this.Session.Profile is not null && this.RestoredProfile is not null)
+                this.RestoredProfile.ExpiresAt = this.Session.Profile.ExpiresAt;
+        }
+        catch (CookieSessionException ex)
+        {
+            this.error = ex.Message;
+        }
+        finally
+        {
+            this.rotating = false;
+        }
+    }
+
+    private async Task SignOut()
+    {
+        await this.Session.SignOutAsync();
+        this.ApplySignedOut();
+    }
+
+    private void ApplySignedOut()
+    {
+        if (this.subscription is not null)
+            _ = this.subscription.DisposeAsync();
+        this.subscription = null;
+        this.RestoredProfile = null;
+        this.RestoredNotes = null;
+        this.notes.Clear();
+        this.events.Clear();
+        this.realtimeDetail = "Idle";
+        this.loop?.Cancel();
+    }
+
+    private void StartLoop()
+    {
+        this.loop?.Cancel();
+        this.loop = new CancellationTokenSource();
+        _ = this.RefreshLoop(this.loop.Token);
+    }
+
+    private async Task RefreshLoop(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var delay = this.Session.TimeUntilRefresh(DateTimeOffset.UtcNow);
+            if (delay is null)
+                return;
+            try
+            {
+                await Task.Delay(delay.Value, cancellationToken);
+                await this.Session.RotateAsync(cancellationToken);
+                if (this.Session.Profile is not null && this.RestoredProfile is not null)
+                    this.RestoredProfile.ExpiresAt = this.Session.Profile.ExpiresAt;
+                await this.InvokeAsync(this.StateHasChanged);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (CookieSessionException ex)
+            {
+                this.error = ex.Message;
+                await this.InvokeAsync(this.StateHasChanged);
+                return;
+            }
+        }
+    }
+
+    private SessionProfile CopyProfile(SessionProfile profile) => new()
+    {
+        UserId = profile.UserId,
+        Email = profile.Email,
+        ExpiresAt = profile.ExpiresAt,
+    };
+
+    public void Dispose()
+    {
+        this.Session.SessionEnded -= this.OnRemoteSignOut;
+        this.persistServer.Dispose();
+        this.persistWasm.Dispose();
+        this.loop?.Cancel();
+        this.loop?.Dispose();
+        _ = this.subscription?.DisposeAsync();
+    }
+
+    /// <summary>Prerendered view. Deliberately has no token fields, so the HTML state cannot carry one.</summary>
+    private sealed class ViewState
+    {
+        public SessionProfile? Profile { get; set; }
+
+        public List<NoteRow>? Notes { get; set; }
+    }
+
+    private sealed class SignInForm
+    {
+        public string Email { get; set; } = "";
+
+        public string Password { get; set; } = "";
+    }
+}

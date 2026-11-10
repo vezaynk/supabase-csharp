@@ -1,4 +1,5 @@
 # globs
+.data-protection-keys/
 Makefile.in
 *.userprefs
 *.usertasks
