@@ -193,6 +193,7 @@ internal sealed class ChromePage
     private readonly List<string> sentFrames = [];
     private readonly List<string> socketUrls = [];
     private readonly List<int> tokenStatuses = [];
+    private readonly List<int> notesStatuses = [];
     private string? documentRequestId;
 
     public ChromePage(HeadlessChrome chrome, string sessionId)
@@ -209,6 +210,15 @@ internal sealed class ChromePage
         {
             lock (this.tokenStatuses)
                 return this.tokenStatuses.ToArray();
+        }
+    }
+
+    public IReadOnlyList<int> NotesStatuses
+    {
+        get
+        {
+            lock (this.notesStatuses)
+                return this.notesStatuses.ToArray();
         }
     }
 
@@ -242,6 +252,8 @@ internal sealed class ChromePage
     {
         lock (this.tokenStatuses)
             this.tokenStatuses.Clear();
+        lock (this.notesStatuses)
+            this.notesStatuses.Clear();
         lock (this.sentFrames)
             this.sentFrames.Clear();
         lock (this.socketUrls)
@@ -252,6 +264,18 @@ internal sealed class ChromePage
 
     public Task SetCookieAsync(string name, string value, string url) =>
         this.SendAsync("Network.setCookie", new { name, value, url, httpOnly = true, path = "/" });
+
+    public Task InstallScriptAsync(string source) =>
+        this.SendAsync("Page.addScriptToEvaluateOnNewDocument", new { source });
+
+    public async Task ScreenshotAsync(string path)
+    {
+        var json = await this.SendAsync("Page.captureScreenshot", new { format = "png" }).ConfigureAwait(false);
+        using var document = JsonDocument.Parse(json);
+        var data = document.RootElement.GetProperty("data").GetString() ?? "";
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.WriteAllBytesAsync(path, Convert.FromBase64String(data)).ConfigureAwait(false);
+    }
 
     public async Task NavigateAsync(string url)
     {
@@ -311,6 +335,12 @@ internal sealed class ChromePage
             {
                 lock (this.tokenStatuses)
                     this.tokenStatuses.Add(response.GetProperty("status").GetInt32());
+            }
+
+            if (url.Contains("/rest/v1/notes", StringComparison.Ordinal))
+            {
+                lock (this.notesStatuses)
+                    this.notesStatuses.Add(response.GetProperty("status").GetInt32());
             }
 
             if (this.documentRequestId is null && parameters.GetProperty("type").GetString() == "Document")

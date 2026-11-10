@@ -33,7 +33,9 @@ Interactive Auto starts on the server circuit and then moves to WASM. The server
 
 Document requests (`/`, `/server`, `/static`) run `UsePrerenderSession` before the Razor endpoint. The refresh cookie is redeemed there, `Set-Cookie` is appended, and only then does the page render. The access token stays in that HTTP request's scope. These pages do not enable streaming rendering. If a response has already started, the middleware does not write a cookie and the HTML stays signed out.
 
-The interactive circuit is a new scope. It does not see the prerender access token. Its first `EnsureAsync` asks the browser to call `/auth/session/token`, which redeems the cookie the document response just stored. That is a second refresh of the same visit. WASM on the same page can then reuse the access token held in the JS module if it is still inside the skew, so the handoff does not have to redeem a third time.
+The interactive circuit is a new scope. It does not see the prerender access token. Prerender persists only the profile and the notes (`PersistentComponentState`, key `cookie-session-view-auto` or `cookie-session-view-server`). That payload has no refresh token and no access token, so neither is written into the HTML. The first interactive render, Server or WASM, paints that same profile and those same notes. It does not fetch notes again and it does not show the sign-in form.
+
+The interactive runtime still needs an access token to open a socket. After the first paint it calls `POST /auth/session/token` in the background, keeps the notes on screen, and then subscribes. That is one extra refresh for the new runtime. Putting the prerender access token in the persisted state would avoid it, and would also embed that JWT in the page. This sample does not do that. Static `/static` never starts that second redeem.
 
 ## Rotation, and the races that remain
 
@@ -123,7 +125,7 @@ Command:
 dotnet test packages/CookieSession/Supabase.CookieSession.Tests/Supabase.CookieSession.Tests.csproj
 ```
 
-This run: **38 passed, 0 failed** (Release, net10.0), including the headless Chrome test below. No test called a live Supabase project. `LiveSupabase_IsOptInAndWasNotRun` returns immediately unless `COOKIE_SESSION_LIVE_URL` is set, and even then it does not dial out. Docker and the Supabase CLI are not installed here, so nothing ran `supabase start`.
+This run: **39 passed, 0 failed** (Release, net10.0), including both headless Chrome tests below. No test called a live Supabase project. `LiveSupabase_IsOptInAndWasNotRun` returns immediately unless `COOKIE_SESSION_LIVE_URL` is set, and even then it does not dial out. Docker and the Supabase CLI are not installed here, so nothing ran `supabase start`.
 
 Covered with fakes and the real SDK client:
 
@@ -140,7 +142,9 @@ Covered with fakes and the real SDK client:
 - A failed `POST /auth/session/token` keeps its own status. The sample's status-code page does not re-execute `/auth`, so a missing `Origin` stays HTTP 403 and the body is not the Razor sentence `The request has an incorrect Content-type.`
 - An older cookie generation inside the single-flight TTL is answered with the newer grant and does not call GoTrue again.
 
-`BrowserProtocolTests` starts `ProtocolHost` (see the limits below), the sample, and headless Chrome. It is part of the command above. On this machine it passed twice. What that run checked:
+Before this handoff change, the interactive scope started empty. `OnInitializedAsync` redeemed the cookie again and called notes again before it could paint, so a document load produced two notes calls. The flicker test fails if that returns: a `MutationObserver` installed before the document records whether `[data-profile]` or `[data-note]` disappears, whether `[data-signin]` appears, and whether a `[data-loading]` placeholder appears. It also requires exactly one notes call per document and, for an interactive page, exactly one background `POST /auth/session/token`. Static requires zero token calls. Rotation on `/server` must add a token call and no notes call, without removing the profile.
+
+`BrowserProtocolTests` starts `ProtocolHost` (see the limits below), the sample, and headless Chrome. It is part of the command above. What that run checked:
 
 - Signed-in `/static` HTML, from the document response, contains `a@example.test` and `seed-note-a`.
 - First Auto visit is Interactive Server (`sdk-server-websocket`) and shows that note.

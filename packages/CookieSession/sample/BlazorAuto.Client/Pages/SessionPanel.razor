@@ -1,55 +1,76 @@
 @inject ICookieSession Session
+@inject PersistentComponentState PersistentState
 @implements IDisposable
 
-<h1>Cookie session</h1>
-<p class="lede">Access tokens stay in memory. Refresh tokens stay in an HttpOnly cookie.</p>
-<p class="mode">Interactive: @Interactive. Realtime: @(Interactive ? Session.RealtimeTransport : "not started until interactive").</p>
+<article class="session">
+    <header class="session-head">
+        <div>
+            <h1>Cookie session</h1>
+            <p class="lede">Access tokens stay in memory. Refresh tokens stay in an HttpOnly cookie.</p>
+        </div>
+        <div class="status">
+            <span class="pill" data-runtime="@this.RuntimeLabel">@this.RuntimeLabel</span>
+            <span class="pill @(this.Interactive ? "live" : "")" data-realtime="@this.RealtimeLabel">@this.RealtimeLabel</span>
+        </div>
+    </header>
 
-@if (!string.IsNullOrEmpty(error))
-{
-    <p class="error">@error</p>
-}
+    @if (!string.IsNullOrEmpty(this.error))
+    {
+        <p class="error" data-error>@this.error</p>
+    }
 
-@if (Session.Profile is null)
-{
-    <EditForm Model="form" OnValidSubmit="SignIn" FormName="@FormName">
-        <label>Email <InputText @bind-Value="form.Email" /></label>
-        <label>Password <InputText @bind-Value="form.Password" type="password" /></label>
-        <button type="submit">Sign in</button>
-    </EditForm>
-}
-else
-{
-    <p class="profile">@Session.Profile.Email (@Session.Profile.UserId)</p>
-    <p>Access token is in memory until @Session.Profile.ExpiresAt.ToString("u"). It is not written to localStorage.</p>
-    <div class="actions">
-        @if (Interactive)
-        {
-            <button @onclick="LoadNotes">Load notes</button>
-            <button @onclick="Subscribe">Subscribe</button>
-            <button @onclick="Rotate">Rotate</button>
-        }
-        <button @onclick="SignOut">Sign out</button>
-    </div>
-    <ul class="notes">
-        @foreach (var note in notes)
-        {
-            <li>@note.Id: @note.Body</li>
-        }
-    </ul>
-    <ul>
-        @foreach (var item in events)
-        {
-            <li>@item</li>
-        }
-    </ul>
-}
+    @if (this.RestoredProfile is null)
+    {
+        <div data-signin>
+            <EditForm Model="this.form" OnValidSubmit="this.SignIn" FormName="@this.FormName">
+                <label>Email <InputText @bind-Value="this.form.Email" /></label>
+                <label>Password <InputText @bind-Value="this.form.Password" type="password" /></label>
+                <button type="submit">Sign in</button>
+            </EditForm>
+        </div>
+    }
+    else
+    {
+        <section data-profile>
+            <p class="profile">@this.RestoredProfile.Email (@this.RestoredProfile.UserId)</p>
+            <p class="expiry">Signed in until @this.RestoredProfile.ExpiresAt.ToString("u"). The access token stays in memory and is not written to localStorage.</p>
+            <div class="actions">
+                <button type="button" disabled="@(!this.Interactive)" @onclick="this.LoadNotes">Load notes</button>
+                <button type="button" disabled="@(!this.Interactive)" @onclick="this.Subscribe">Subscribe</button>
+                <button type="button" disabled="@(!this.Interactive || this.rotating)" @onclick="this.Rotate">Rotate</button>
+                <button type="button" @onclick="this.SignOut">Sign out</button>
+            </div>
+            <ul class="notes" data-notes>
+                @foreach (var note in this.notes)
+                {
+                    <li data-note="@note.Id">@note.Id: @note.Body</li>
+                }
+            </ul>
+            <ul class="events" data-events>
+                @if (this.events.Count == 0)
+                {
+                    <li class="quiet">Channel quiet</li>
+                }
+                else
+                {
+                    @foreach (var item in this.events)
+                    {
+                        <li>@item</li>
+                    }
+                }
+            </ul>
+        </section>
+    }
+</article>
 
 @code {
     private readonly SignInForm form = new();
     private readonly List<NoteRow> notes = [];
     private readonly List<string> events = [];
     private string? error;
+    private string realtimeDetail = "Idle";
+    private bool rotating;
+    private bool connecting;
     private CancellationTokenSource? loop;
     private ISdkSubscription? subscription;
 
@@ -57,10 +78,82 @@ else
     public bool Interactive { get; set; }
 
     [Parameter]
+    public string Page { get; set; } = "static";
+
+    [Parameter]
     public string FormName { get; set; } = "sign-in";
+
+    /// <summary>Profile from prerender. No access token and no refresh token.</summary>
+    private SessionProfile? RestoredProfile { get; set; }
+
+    /// <summary>Notes from prerender. No access token and no refresh token.</summary>
+    private List<NoteRow>? RestoredNotes { get; set; }
+
+    private PersistingComponentStateSubscription persistServer;
+    private PersistingComponentStateSubscription persistWasm;
+
+    private string RuntimeLabel
+    {
+        get
+        {
+            if (!this.Interactive)
+                return this.Page == "static" ? "Static" : "Prerender";
+            return OperatingSystem.IsBrowser() ? "WebAssembly" : "Server";
+        }
+    }
+
+    private string RealtimeLabel => this.Interactive ? this.realtimeDetail : "not started until interactive";
+
+    protected override void OnInitialized()
+    {
+        this.RestoreView();
+        this.RegisterPersist();
+        this.CopyRestoredNotes();
+    }
+
+    private void RestoreView()
+    {
+        if (!this.PersistentState.TryTakeFromJson<ViewState>(this.StateKey, out var view) || view is null)
+            return;
+        this.RestoredProfile = view.Profile;
+        this.RestoredNotes = view.Notes;
+    }
+
+    private void RegisterPersist()
+    {
+        if (this.Page == "server")
+            this.persistServer = this.PersistentState.RegisterOnPersisting(this.Persist, RenderMode.InteractiveServer);
+        else if (this.Page == "auto")
+        {
+            this.persistServer = this.PersistentState.RegisterOnPersisting(this.Persist, RenderMode.InteractiveServer);
+            this.persistWasm = this.PersistentState.RegisterOnPersisting(this.Persist, RenderMode.InteractiveWebAssembly);
+        }
+    }
+
+    private Task Persist()
+    {
+        this.PersistentState.PersistAsJson(this.StateKey, new ViewState
+        {
+            Profile = this.RestoredProfile,
+            Notes = this.RestoredNotes ?? this.notes.ToList(),
+        });
+        return Task.CompletedTask;
+    }
+
+    private string StateKey => "cookie-session-view-" + this.Page;
+
+    protected override void OnParametersSet()
+    {
+        if (this.Interactive && this.RestoredProfile is not null)
+            this.BeginInteractive();
+    }
 
     protected override async Task OnInitializedAsync()
     {
+        this.CopyRestoredNotes();
+        if (this.RestoredProfile is not null)
+            return;
+
         try
         {
             await this.Session.EnsureAsync();
@@ -79,20 +172,70 @@ else
         if (this.Session.Profile is null)
             return;
 
+        this.RestoredProfile = this.CopyProfile(this.Session.Profile);
         try
         {
-            this.notes.AddRange(await this.Session.GetNotesAsync());
+            var loaded = await this.Session.GetNotesAsync();
+            this.notes.AddRange(loaded);
+            this.RestoredNotes = this.notes.ToList();
         }
         catch (Exception ex)
         {
-            // A data call is not a sign-out. The profile stays on the page.
             this.error = ex.Message;
         }
 
-        if (!this.Interactive)
-            return;
+        this.BeginInteractive();
+    }
 
-        this.StartLoop();
+    private void CopyRestoredNotes()
+    {
+        if (this.notes.Count == 0 && this.RestoredNotes is not null)
+            this.notes.AddRange(this.RestoredNotes);
+    }
+
+    private void BeginInteractive()
+    {
+        if (!this.Interactive || this.connecting)
+            return;
+        this.connecting = true;
+        _ = this.ConnectAsync();
+    }
+
+    private async Task ConnectAsync()
+    {
+        this.realtimeDetail = "Connecting";
+        await this.InvokeAsync(this.StateHasChanged);
+        try
+        {
+            await this.Session.EnsureAsync();
+            if (this.Session.Profile is not null && this.RestoredProfile is not null)
+                this.RestoredProfile.ExpiresAt = this.Session.Profile.ExpiresAt;
+            this.StartLoop();
+            this.subscription ??= await this.Session.SubscribeAsync("notes", message =>
+            {
+                if (message is "phx_reply" or "phx_close" or "heartbeat")
+                    return Task.CompletedTask;
+                this.events.Add(message);
+                return this.InvokeAsync(this.StateHasChanged);
+            });
+            this.events.Add("joined notes via " + this.subscription.Transport);
+            this.realtimeDetail = "Open · " + this.subscription.Transport;
+        }
+        catch (CookieSessionException ex) when (ex.Reauthenticate)
+        {
+            this.RestoredProfile = null;
+            this.RestoredNotes = null;
+            this.notes.Clear();
+            this.error = null;
+            this.realtimeDetail = "Idle";
+        }
+        catch (Exception ex)
+        {
+            this.error = ex.Message;
+            this.realtimeDetail = "Interrupted";
+        }
+
+        await this.InvokeAsync(this.StateHasChanged);
     }
 
     private async Task SignIn()
@@ -102,9 +245,11 @@ else
         {
             await this.Session.SignInAsync(this.form.Email, this.form.Password);
             this.notes.Clear();
+            this.events.Clear();
             this.notes.AddRange(await this.Session.GetNotesAsync());
-            if (this.Interactive)
-                this.StartLoop();
+            this.RestoredProfile = this.Session.Profile is null ? null : this.CopyProfile(this.Session.Profile);
+            this.RestoredNotes = this.notes.ToList();
+            this.BeginInteractive();
         }
         catch (CookieSessionException ex)
         {
@@ -117,8 +262,10 @@ else
         this.error = null;
         try
         {
+            var loaded = await this.Session.GetNotesAsync();
             this.notes.Clear();
-            this.notes.AddRange(await this.Session.GetNotesAsync());
+            this.notes.AddRange(loaded);
+            this.RestoredNotes = this.notes.ToList();
         }
         catch (Exception ex)
         {
@@ -128,34 +275,28 @@ else
 
     private async Task Subscribe()
     {
-        if (!this.Interactive)
+        if (!this.Interactive || this.subscription is not null)
             return;
-        this.error = null;
-        try
-        {
-            this.subscription ??= await this.Session.SubscribeAsync("notes", message =>
-            {
-                this.events.Add(message);
-                return this.InvokeAsync(this.StateHasChanged);
-            });
-            this.events.Add("joined notes via " + this.subscription.Transport);
-        }
-        catch (Exception ex)
-        {
-            this.error = ex.Message;
-        }
+        await this.ConnectAsync();
     }
 
     private async Task Rotate()
     {
         this.error = null;
+        this.rotating = true;
         try
         {
             await this.Session.RotateAsync();
+            if (this.Session.Profile is not null && this.RestoredProfile is not null)
+                this.RestoredProfile.ExpiresAt = this.Session.Profile.ExpiresAt;
         }
         catch (CookieSessionException ex)
         {
             this.error = ex.Message;
+        }
+        finally
+        {
+            this.rotating = false;
         }
     }
 
@@ -165,8 +306,11 @@ else
             await this.subscription.DisposeAsync();
         this.subscription = null;
         await this.Session.SignOutAsync();
+        this.RestoredProfile = null;
+        this.RestoredNotes = null;
         this.notes.Clear();
         this.events.Clear();
+        this.realtimeDetail = "Idle";
         this.loop?.Cancel();
     }
 
@@ -188,6 +332,8 @@ else
             {
                 await Task.Delay(delay.Value, cancellationToken);
                 await this.Session.RotateAsync(cancellationToken);
+                if (this.Session.Profile is not null && this.RestoredProfile is not null)
+                    this.RestoredProfile.ExpiresAt = this.Session.Profile.ExpiresAt;
                 await this.InvokeAsync(this.StateHasChanged);
             }
             catch (OperationCanceledException)
@@ -203,11 +349,28 @@ else
         }
     }
 
+    private SessionProfile CopyProfile(SessionProfile profile) => new()
+    {
+        UserId = profile.UserId,
+        Email = profile.Email,
+        ExpiresAt = profile.ExpiresAt,
+    };
+
     public void Dispose()
     {
+        this.persistServer.Dispose();
+        this.persistWasm.Dispose();
         this.loop?.Cancel();
         this.loop?.Dispose();
         _ = this.subscription?.DisposeAsync();
+    }
+
+    /// <summary>Prerendered view. Deliberately has no token fields, so the HTML state cannot carry one.</summary>
+    private sealed class ViewState
+    {
+        public SessionProfile? Profile { get; set; }
+
+        public List<NoteRow>? Notes { get; set; }
     }
 
     private sealed class SignInForm

@@ -1,6 +1,7 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using BlazorAuto.Components;
+using Microsoft.AspNetCore.Components.Infrastructure;
 using Microsoft.AspNetCore.DataProtection;
 using Supabase.CookieSession;
 
@@ -23,6 +24,7 @@ builder.Services.AddCookieSession(options =>
         options.AnonKey = key;
 });
 builder.Services.AddAntiforgery();
+builder.Services.AddSupplyValueFromPersistentComponentStateProvider();
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents()
     .AddInteractiveWebAssemblyComponents();
