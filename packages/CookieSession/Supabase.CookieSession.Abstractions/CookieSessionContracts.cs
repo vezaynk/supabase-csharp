@@ -34,6 +34,12 @@ public interface ICookieSession
     Task<IReadOnlyList<NoteRow>> GetNotesAsync(CancellationToken cancellationToken = default);
 
     Task<ISdkSubscription> SubscribeAsync(string topic, Func<string, Task> onEvent, CancellationToken cancellationToken = default);
+
+    /// <summary>Raised when another tab signals sign-out. The signal carries no token.</summary>
+    event Action? SessionEnded;
+
+    /// <summary>Listens for the browser sign-out signal. Safe to call more than once.</summary>
+    Task WatchSignOutAsync();
 }
 
 /// <summary>A native SDK channel subscription. Disposing it leaves that channel.</summary>

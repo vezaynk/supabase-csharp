@@ -92,6 +92,30 @@ public class GotrueAndBrowserTests
     }
 
     [TestMethod]
+    public async Task BrowserCookieSession_ShouldKeepTheSocket_GivenAStaleGenerationAsksForARetry()
+    {
+        var factory = new RecordingFactory();
+        var js = new FakeJs();
+        var store = new MemoryAccessTokenStore();
+        var session = new BrowserCookieSession(js, new SupabaseMemoryOptions
+        {
+            SupabaseUrl = "http://project.test",
+            AnonKey = "sb_publishable_testkey",
+            HeartbeatInterval = TimeSpan.FromHours(1),
+            WebSocketFactory = factory,
+        }, store);
+        await session.SignInAsync("a@example.test", "pw");
+        await session.SubscribeAsync("notes", _ => Task.CompletedTask);
+        js.Next = new AcquireResult { Ok = false, Status = 409, Error = "token request failed" };
+
+        var act = () => session.RotateAsync();
+
+        (await act.Should().ThrowAsync<CookieSessionException>()).Which.Reauthenticate.Should().BeFalse();
+        store.AccessToken.Should().NotBeNull();
+        factory.Socket.IsRunning.Should().BeTrue();
+    }
+
+    [TestMethod]
     public void Script_ShouldUseWebLocksAndRefuseARefreshTokenInTheBrowser()
     {
         var root = FindRepo();
@@ -100,6 +124,9 @@ public class GotrueAndBrowserTests
         script.Should().Contain("credentials: \"same-origin\"");
         script.Should().Contain("cache: \"no-store\"");
         script.Should().Contain("refresh_token");
+        script.Should().Contain("BroadcastChannel");
+        script.Should().Contain("\"signed-out\"");
+        script.Should().Contain("postMessage({ type: \"signed-out\" })");
         script.Should().NotContain("localStorage").And.NotContain("sessionStorage").And.NotContain("indexedDB");
     }
 

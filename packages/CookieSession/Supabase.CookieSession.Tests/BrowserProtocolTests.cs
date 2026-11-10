@@ -101,8 +101,9 @@ public class BrowserProtocolTests
             afterServer.Should().NotContain("token request failed").And.NotContain("seed-note-b");
 
             await auto.ClickAsync("Sign out").ConfigureAwait(false);
+            await WaitTextAsync(auto, text => text.Contains("Sign in", StringComparison.Ordinal), TimeSpan.FromSeconds(20), "sign-out did not return the form", detail, protocol).ConfigureAwait(false);
             await auto.NavigateAsync(origin + "/").ConfigureAwait(false);
-            var signedOut = await WaitTextAsync(auto, text => text.Contains("Sign in", StringComparison.Ordinal), TimeSpan.FromSeconds(20), "sign-out did not return the form", detail, protocol).ConfigureAwait(false);
+            var signedOut = await WaitTextAsync(auto, text => text.Contains("Sign in", StringComparison.Ordinal), TimeSpan.FromSeconds(20), "sign-out did not survive a reload", detail, protocol).ConfigureAwait(false);
             signedOut.Should().NotContain("a@example.test");
             await other.NavigateAsync(origin + "/static").ConfigureAwait(false);
             var stillB = await WaitTextAsync(other, text => text.Contains("b@example.test", StringComparison.Ordinal), TimeSpan.FromSeconds(20), "signing out user A cleared user B", detail, protocol).ConfigureAwait(false);
@@ -148,6 +149,36 @@ public class BrowserProtocolTests
         after.NoteLost.Should().BeFalse("rotation replaced the notes: " + after.Summary);
         after.SignInSeen.Should().BeFalse("rotation showed the sign-in form: " + after.Summary);
         protocol.Snapshot().Count(frame => frame.Kind == "notes").Should().Be(notes, "rotation must not reload notes");
+    }
+
+    [TestMethod]
+    [Timeout(120000)]
+    public async Task SignOut_ShouldClearTheOtherTabWithoutWaitingForRefresh()
+    {
+        await using var protocol = await ProtocolHost.StartAsync().ConfigureAwait(false);
+        await using var sample = await SampleProcess.StartAsync(protocol.Url).ConfigureAwait(false);
+        await using var chrome = await HeadlessChrome.LaunchAsync().ConfigureAwait(false);
+        var origin = sample.Origin;
+        var cookies = await this.SignInAsync(sample.OriginUri, "a@example.test").ConfigureAwait(false);
+        var server = await chrome.OpenAsync().ConfigureAwait(false);
+        var stat = await chrome.OpenAsync().ConfigureAwait(false);
+        foreach (var cookie in cookies)
+        {
+            await server.SetCookieAsync(cookie.Name, cookie.Value, origin + "/").ConfigureAwait(false);
+            await stat.SetCookieAsync(cookie.Name, cookie.Value, origin + "/").ConfigureAwait(false);
+        }
+
+        await server.NavigateAsync(origin + "/server").ConfigureAwait(false);
+        await WaitTextAsync(server, text => text.Contains("sdk-server-websocket", StringComparison.Ordinal) && text.Contains("a@example.test", StringComparison.Ordinal), TimeSpan.FromSeconds(30), "server tab did not sign in", new StringBuilder(), protocol).ConfigureAwait(false);
+        await WaitAsync(async () => await server.EvalAsync("document.querySelector('[data-watch=\"on\"]') ? 'on' : ''").ConfigureAwait(false), value => value == "on", TimeSpan.FromSeconds(10), "server tab is not listening for sign-out").ConfigureAwait(false);
+        await stat.NavigateAsync(origin + "/static").ConfigureAwait(false);
+        await WaitTextAsync(stat, text => text.Contains("a@example.test", StringComparison.Ordinal) && text.Contains("seed-note-a", StringComparison.Ordinal), TimeSpan.FromSeconds(20), "static tab did not sign in", new StringBuilder(), protocol).ConfigureAwait(false);
+
+        await stat.ClickAsync("Sign out").ConfigureAwait(false);
+        await WaitTextAsync(stat, text => text.Contains("Sign in", StringComparison.Ordinal), TimeSpan.FromSeconds(20), "static sign-out did not return the signed-out page", new StringBuilder(), protocol).ConfigureAwait(false);
+        var other = await WaitTextAsync(server, text => text.Contains("Sign in", StringComparison.Ordinal), TimeSpan.FromSeconds(10), "the other tab kept the signed-in UI after sign-out", new StringBuilder(), protocol).ConfigureAwait(false);
+        other.Should().NotContain("a@example.test");
+        other.Should().NotContain("seed-note-a");
     }
 
     private async Task AssertQuietHandoffAsync(ProtocolHost protocol, ChromePage page, string url, string runtime, int tokenCalls, string screenshot)

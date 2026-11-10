@@ -2,7 +2,7 @@
 @inject PersistentComponentState PersistentState
 @implements IDisposable
 
-<article class="session">
+<article class="session" data-watch="@(this.watching ? "on" : "off")">
     <header class="session-head">
         <div>
             <h1>Cookie session</h1>
@@ -38,7 +38,18 @@
                 <button type="button" disabled="@(!this.Interactive)" @onclick="this.LoadNotes">Load notes</button>
                 <button type="button" disabled="@(!this.Interactive)" @onclick="this.Subscribe">Subscribe</button>
                 <button type="button" disabled="@(!this.Interactive || this.rotating)" @onclick="this.Rotate">Rotate</button>
-                <button type="button" @onclick="this.SignOut">Sign out</button>
+                @if (this.Page == "static")
+                {
+                    <form method="post" action="/auth/session/signout" data-static-signout onsubmit="if (window.cookieSession) cookieSession.notifySignedOut()">
+                        <input type="hidden" name="__RequestVerificationToken" value="@this.AntiforgeryToken" />
+                        <input type="hidden" name="returnUrl" value="/static" />
+                        <button type="submit">Sign out</button>
+                    </form>
+                }
+                else
+                {
+                    <button type="button" @onclick="this.SignOut">Sign out</button>
+                }
             </div>
             <ul class="notes" data-notes>
                 @foreach (var note in this.notes)
@@ -71,6 +82,7 @@
     private string realtimeDetail = "Idle";
     private bool rotating;
     private bool connecting;
+    private bool watching;
     private CancellationTokenSource? loop;
     private ISdkSubscription? subscription;
 
@@ -82,6 +94,9 @@
 
     [Parameter]
     public string FormName { get; set; } = "sign-in";
+
+    [CascadingParameter(Name = "AntiforgeryRequestToken")]
+    public string? AntiforgeryToken { get; set; }
 
     /// <summary>Profile from prerender. No access token and no refresh token.</summary>
     private SessionProfile? RestoredProfile { get; set; }
@@ -106,10 +121,26 @@
 
     protected override void OnInitialized()
     {
+        this.Session.SessionEnded += this.OnRemoteSignOut;
         this.RestoreView();
         this.RegisterPersist();
         this.CopyRestoredNotes();
     }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || !this.Interactive || this.watching)
+            return;
+        this.watching = true;
+        await this.Session.WatchSignOutAsync();
+        await this.InvokeAsync(this.StateHasChanged);
+    }
+
+    private void OnRemoteSignOut() => _ = this.InvokeAsync(() =>
+    {
+        this.ApplySignedOut();
+        this.StateHasChanged();
+    });
 
     private void RestoreView()
     {
@@ -302,10 +333,15 @@
 
     private async Task SignOut()
     {
-        if (this.subscription is not null)
-            await this.subscription.DisposeAsync();
-        this.subscription = null;
         await this.Session.SignOutAsync();
+        this.ApplySignedOut();
+    }
+
+    private void ApplySignedOut()
+    {
+        if (this.subscription is not null)
+            _ = this.subscription.DisposeAsync();
+        this.subscription = null;
         this.RestoredProfile = null;
         this.RestoredNotes = null;
         this.notes.Clear();
@@ -358,6 +394,7 @@
 
     public void Dispose()
     {
+        this.Session.SessionEnded -= this.OnRemoteSignOut;
         this.persistServer.Dispose();
         this.persistWasm.Dispose();
         this.loop?.Cancel();

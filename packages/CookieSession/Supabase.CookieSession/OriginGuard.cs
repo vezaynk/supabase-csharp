@@ -11,11 +11,15 @@ public static class OriginGuard
         if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri))
             return false;
 
-        var host = request.Host.Host;
-        if (!uri.Host.Equals(host, StringComparison.OrdinalIgnoreCase))
-            return options.AllowedOrigins.Contains(uri.GetLeftPart(UriPartial.Authority), StringComparer.OrdinalIgnoreCase);
+        // An allow-list entry is an exact scheme and authority. It overrides a scheme or host
+        // mismatch (HTTPS at the browser, HTTP behind a terminator) and does not allow other origins.
+        var authority = uri.GetLeftPart(UriPartial.Authority);
+        if (options.AllowedOrigins.Contains(authority, StringComparer.OrdinalIgnoreCase))
+            return true;
 
-        if (uri.Scheme != request.Scheme)
+        if (!uri.Host.Equals(request.Host.Host, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!uri.Scheme.Equals(request.Scheme, StringComparison.OrdinalIgnoreCase))
             return false;
 
         var requestPort = request.Host.Port ?? (request.Scheme == "https" ? 443 : 80);

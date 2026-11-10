@@ -71,6 +71,14 @@ public static class CookieSessionEndpoints
         if (cookie is null || jar.IsRevoked(cookie.SessionId))
             return Results.Unauthorized();
 
+        // A newer cookie is already in the browser. Do not call GoTrue with the stale refresh
+        // token, and do not tell this tab to sign out. 409 asks it to retry with the current cookie.
+        if (!jar.StillCurrent(cookie.SessionId, cookie.Generation))
+        {
+            NoStore(http);
+            return Results.StatusCode(StatusCodes.Status409Conflict);
+        }
+
         try
         {
             var grant = await authority.RedeemAsync(cookie, (next, _) => Task.FromResult(jar.TryWrite(http.Response, next)), cancellationToken).ConfigureAwait(false);
@@ -109,7 +117,18 @@ public static class CookieSessionEndpoints
         var accessToken = Bearer(http.Request);
         await auth.SignOutAsync(accessToken, cancellationToken).ConfigureAwait(false);
         NoStore(http);
+        if (http.Request.HasFormContentType)
+            return Results.LocalRedirect(LocalReturn(http.Request.Form["returnUrl"].ToString()));
         return Results.NoContent();
+    }
+
+    private static string LocalReturn(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length > 200)
+            return "/";
+        if (!value.StartsWith('/') || value.StartsWith("//", StringComparison.Ordinal) || value.Contains('\\') || value.Contains("://", StringComparison.Ordinal))
+            return "/";
+        return value;
     }
 
     private static async Task<bool> AllowedAsync(HttpContext http, IAntiforgery antiforgery, CookieSessionOptions options)

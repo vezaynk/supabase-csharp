@@ -89,6 +89,11 @@ form, .actions {
   min-height: 2.4rem;
 }
 
+form[data-static-signout] {
+  display: inline-flex;
+  margin: 0;
+}
+
 label {
   display: flex;
   flex-direction: column;

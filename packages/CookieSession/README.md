@@ -24,7 +24,7 @@ A refresh is successful only after `Set-Cookie` is written. If GoTrue rotates th
 
 | Mode | Access token | Refresh cookie | Database | Realtime |
 | --- | --- | --- | --- | --- |
-| Static SSR (`/static`) | Redeemed in middleware for that request, then discarded with the request | Rotated on that response, before the endpoint writes the body | SDK Postgrest from the server, user JWT. Profile and notes are in the HTML | Not started |
+| Static SSR (`/static`) | Redeemed in middleware for that request, then discarded with the request | Rotated on that response, before the endpoint writes the body. Sign-out is a form POST to `/auth/session/signout`, which clears the cookie and redirects to the signed-out page | SDK Postgrest from the server, user JWT. Profile and notes are in the HTML | Not started |
 | Prerender of InteractiveAuto (`/`) and InteractiveServer (`/server`) | Same request-scoped redeem. No JS. The circuit does not share this instance | Rotated on that document response. A started response refuses `Set-Cookie` and renders signed out | Same: profile and notes are in the first HTML | Not started. The refresh loop and socket start only after `RendererInfo.IsInteractive` |
 | Interactive Server, after the circuit starts | Browser calls `POST /auth/session/token` because the prerender scope is gone, then JS passes the access token into the new circuit | The cookie from the document response. This is a second redeem, not a second copy of the prerender memory | SDK Postgrest from the server | Native SDK `ClientWebSocket` from the server to Supabase (`sdk-server-websocket`) |
 | WASM, including Auto after the handoff | Same endpoint. The access token stays in JS and WASM memory | HttpOnly, so JS cannot read it | SDK Postgrest from the browser | Native SDK `ClientWebSocket` from the browser to Supabase (`sdk-browser-websocket`) |
@@ -48,8 +48,8 @@ While that single-flight entry is still alive, a request that presents an older 
 What this does not prevent:
 
 - Two servers can both redeem the cookie they were given. Supabase's refresh-token reuse window may return the same new pair to the second call. Outside that window one call gets a rejection. The generation guard is per process, so the other server can still `Set-Cookie` a conflicting token. This is not a distributed lock.
-- After the 10 second single-flight memory expires, a request that still presents the old cookie calls GoTrue again. If that call rotates the token and this process has already moved on, the write is rejected and the user must sign in again.
-- Logout clears the cookie and stops local sockets. GoTrue logout is best-effort. An access JWT that was already issued keeps working until it expires.
+- After the 10 second single-flight memory expires, a request that still presents an older generation is not sent to GoTrue and is not a local sign-out. The token endpoint returns 409, the browser retries once with the cookie it has now, and the profile and socket stay up when that cookie is the newer one. A refresh token GoTrue itself rejects, while this process has not stored a newer generation, still clears the cookie and signs out.
+- Logout clears the cookie and stops local sockets. Other tabs hear a `BroadcastChannel` message `{ type: "signed-out" }` and drop their in-memory access token immediately. That message has no token. GoTrue logout is best-effort. An access JWT that was already issued keeps working until it expires.
 - XSS can call the token endpoint. The browser will attach the HttpOnly cookie, and the response contains a fresh access token. HttpOnly stops script from reading the refresh token. It does not stop script from acting as the signed-in user.
 
 User data calls use the user access token and the publishable key. There is no service-role path.
@@ -64,7 +64,7 @@ export SUPABASE_ANON_KEY=sb_publishable_or_anon_key
 dotnet run --project packages/CookieSession/sample/BlazorAuto
 ```
 
-Open `http://127.0.0.1:5288`. `SecureCookies` is false in the sample `appsettings.json` because that URL is HTTP. Set it true behind HTTPS.
+Open `http://127.0.0.1:5288`. `SecureCookies` stays on unless the host is Development: `appsettings.Development.json` sets it false so this HTTP URL can store the cookie. Any other environment forces `SecureCookies` back to true. Behind a TLS terminator, call `UseForwardedHeaders` before the rest of the pipeline (the sample does). ASP.NET trusts forwarded proto and host from loopback only until you add the proxy to `KnownProxies`. `AllowedOrigins` may list an `https://` origin when the app still sees HTTP; it does not allow origins that are absent from the list.
 
 The anon key is public and is embedded in the host page so WASM can construct the SDK client. The refresh token is not embedded.
 
@@ -83,8 +83,9 @@ builder.Services.AddCookieSession(options =>
 {
     options.SupabaseUrl = "http://127.0.0.1:54321";
     options.AnonKey = "sb_publishable_or_anon_key";
-    options.SecureCookies = false; // true on HTTPS
+    options.SecureCookies = false; // Development HTTP only. Leave the default true on HTTPS.
 });
+app.UseForwardedHeaders();
 app.UsePrerenderSession();
 app.MapCookieSessionEndpoints();
 ```
@@ -125,7 +126,7 @@ Command:
 dotnet test packages/CookieSession/Supabase.CookieSession.Tests/Supabase.CookieSession.Tests.csproj
 ```
 
-This run: **39 passed, 0 failed** (Release, net10.0), including both headless Chrome tests below. No test called a live Supabase project. `LiveSupabase_IsOptInAndWasNotRun` returns immediately unless `COOKIE_SESSION_LIVE_URL` is set, and even then it does not dial out. Docker and the Supabase CLI are not installed here, so nothing ran `supabase start`.
+This run: **48 passed, 0 failed** (Release, net10.0), including the headless Chrome tests. No test called a live Supabase project. `LiveSupabase_IsOptInAndWasNotRun` returns immediately unless `COOKIE_SESSION_LIVE_URL` is set, and even then it does not dial out. Docker and the Supabase CLI are not installed here, so nothing ran `supabase start`. The pass count is the command above.
 
 Covered with fakes and the real SDK client:
 

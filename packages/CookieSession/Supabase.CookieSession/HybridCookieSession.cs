@@ -143,6 +143,14 @@ public sealed class HybridCookieSession : ICookieSession, IAsyncDisposable
     public Task<ISdkSubscription> SubscribeAsync(string topic, Func<string, Task> onEvent, CancellationToken cancellationToken = default) =>
         this.browser.SubscribeAsync(topic, onEvent, cancellationToken);
 
+    public event Action? SessionEnded
+    {
+        add => this.browser.SessionEnded += value;
+        remove => this.browser.SessionEnded -= value;
+    }
+
+    public Task WatchSignOutAsync() => this.browser.WatchSignOutAsync();
+
     public ValueTask DisposeAsync() => this.browser.DisposeAsync();
 
     private bool Writable(out HttpContext http)

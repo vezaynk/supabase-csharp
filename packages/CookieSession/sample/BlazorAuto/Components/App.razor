@@ -10,10 +10,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <base href="/" />
-    @if (this.HttpContextAccessor.HttpContext is { } http)
+    @{
+        var csrf = this.HttpContextAccessor.HttpContext is { } http
+            ? this.Antiforgery.GetAndStoreTokens(http).RequestToken
+            : null;
+    }
+    @if (csrf is not null)
     {
-        var tokens = Antiforgery.GetAndStoreTokens(http);
-        <meta name="csrf-token" content="@tokens.RequestToken" />
+        <meta name="csrf-token" content="@csrf" />
     }
     <script id="cookie-session-public" type="application/json">@((MarkupString)PublicConfigJson.Serialize(Options))</script>
     <link rel="stylesheet" href="@Assets["app.css"]" />
@@ -21,7 +25,9 @@
     <HeadOutlet />
 </head>
 <body>
-    <Routes />
+    <CascadingValue Name="AntiforgeryRequestToken" Value="csrf">
+        <Routes />
+    </CascadingValue>
     <script src="@Assets["cookie-session.js"]"></script>
     <script src="@Assets["_framework/blazor.web.js"]"></script>
 </body>

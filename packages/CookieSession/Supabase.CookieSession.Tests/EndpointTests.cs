@@ -4,6 +4,7 @@ using System.Text.Json;
 using FluentAssertions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Supabase.CookieSession.Tests.Support;
@@ -104,6 +105,88 @@ public class EndpointTests
     }
 
     [TestMethod]
+    public async Task Token_ShouldAskForARetry_GivenAStaleGenerationAfterTheSingleFlightWindow()
+    {
+        var auth = new FakeAuth();
+        await using var host = await TestApp.Start(auth);
+        var now = DateTimeOffset.Parse("2026-11-10T00:00:00Z");
+        host.Get<RefreshAuthority>().Clock = () => now;
+        await host.SendAsync(HttpMethod.Post, "/auth/session/signin", new { email = "a@example.test", password = "pw" });
+        var stale = host.CopyCookies();
+        await host.SendAsync(HttpMethod.Post, "/auth/session/token", new { });
+        now = now.AddSeconds(31);
+        var calls = auth.RefreshCalls;
+
+        using var retry = host.CreateClient(stale);
+        var request = new HttpRequestMessage(HttpMethod.Post, "/auth/session/token");
+        request.Headers.TryAddWithoutValidation("Origin", host.Origin);
+        request.Headers.TryAddWithoutValidation("RequestVerificationToken", await host.AntiforgeryAsync(retry));
+        request.Content = JsonContent.Create(new { });
+        var response = await retry.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict, body);
+        auth.RefreshCalls.Should().Be(calls, "a stale generation must not be sent to GoTrue after the window");
+        response.Headers.Should().NotContain(header => header.Key == "Set-Cookie");
+        (await host.SendAsync(HttpMethod.Post, "/auth/session/token", new { })).StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [TestMethod]
+    public async Task Token_ShouldRejectHttpsOriginOnAnHttpApp_GivenNoAllowListAndNoForwardedProto()
+    {
+        await using var host = await TestApp.Start(new FakeAuth());
+        var response = await this.PostTokenAsync(host, host.HttpsOrigin, null);
+        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+    }
+
+    [TestMethod]
+    public async Task Token_ShouldAllowHttpsOrigin_GivenTheAllowListOverridesTheScheme()
+    {
+        await using var host = await TestApp.Start(new FakeAuth());
+        host.Get<CookieSessionOptions>().AllowedOrigins.Add(host.HttpsOrigin);
+        var response = await this.PostTokenAsync(host, host.HttpsOrigin, null);
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [TestMethod]
+    public async Task Token_ShouldAllowHttpsOrigin_GivenForwardedProtoAndHost()
+    {
+        await using var host = await TestApp.Start(new FakeAuth());
+        var response = await this.PostTokenAsync(host, host.HttpsOrigin, new Dictionary<string, string>
+        {
+            ["X-Forwarded-Proto"] = "https",
+            ["X-Forwarded-Host"] = new Uri(host.HttpsOrigin).Authority,
+        });
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [TestMethod]
+    public async Task Token_ShouldRejectAForeignHttpsOrigin_GivenForwardedProto()
+    {
+        await using var host = await TestApp.Start(new FakeAuth());
+        var response = await this.PostTokenAsync(host, "https://evil.example", new Dictionary<string, string>
+        {
+            ["X-Forwarded-Proto"] = "https",
+            ["X-Forwarded-Host"] = new Uri(host.HttpsOrigin).Authority,
+        });
+        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+    }
+
+    private async Task<HttpResponseMessage> PostTokenAsync(TestApp host, string origin, Dictionary<string, string>? extra)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/auth/session/token");
+        request.Headers.TryAddWithoutValidation("Origin", origin);
+        request.Content = JsonContent.Create(new { });
+        if (extra is not null)
+        {
+            foreach (var header in extra)
+                request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        }
+
+        return await host.Client.SendAsync(request);
+    }
+
+    [TestMethod]
     public void AccessGrant_ShouldNotSerializeARefreshToken()
     {
         var json = JsonSerializer.Serialize(new AccessGrant
@@ -131,13 +214,18 @@ internal sealed class TestApp : IAsyncDisposable
 {
     private readonly WebApplication app;
 
-    private TestApp(WebApplication app, HttpClient client, ListLogger logger)
+    private readonly HttpClientHandler handler;
+
+    private TestApp(WebApplication app, HttpClientHandler handler, HttpClient client, ListLogger logger)
     {
         this.app = app;
+        this.handler = handler;
         this.Client = client;
         this.Logger = logger;
         this.Origin = client.BaseAddress!.GetLeftPart(UriPartial.Authority);
     }
+
+    public string HttpsOrigin => "https://" + new Uri(this.Origin).Authority;
 
     public HttpClient Client { get; }
 
@@ -164,13 +252,15 @@ internal sealed class TestApp : IAsyncDisposable
             configure?.Invoke(options);
         });
         builder.Services.AddSingleton<IAuthTokenClient>(auth);
+        builder.Services.Configure<ForwardedHeadersOptions>(options => options.ForwardedHeaders = ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost);
         var app = builder.Build();
+        app.UseForwardedHeaders();
         app.UseAntiforgery();
         app.MapCookieSessionEndpoints();
         await app.StartAsync();
         var handler = new HttpClientHandler { CookieContainer = new CookieContainer(), UseCookies = true };
         var client = new HttpClient(handler) { BaseAddress = new Uri(app.Urls.Single()) };
-        return new TestApp(app, client, logger.Logger);
+        return new TestApp(app, handler, client, logger.Logger);
     }
 
     public async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, object? body)
@@ -187,11 +277,27 @@ internal sealed class TestApp : IAsyncDisposable
         return await this.Client.SendAsync(request);
     }
 
-    public async Task<string> AntiforgeryAsync()
+    public T Get<T>() where T : notnull => this.app.Services.GetRequiredService<T>();
+
+    public CookieContainer CopyCookies()
+    {
+        var copy = new CookieContainer();
+        var uri = this.Client.BaseAddress!;
+        foreach (Cookie cookie in this.handler.CookieContainer.GetCookies(uri))
+            copy.Add(new Cookie(cookie.Name, cookie.Value, string.IsNullOrEmpty(cookie.Path) ? "/" : cookie.Path, uri.Host));
+        return copy;
+    }
+
+    public HttpClient CreateClient(CookieContainer cookies) =>
+        new(new HttpClientHandler { CookieContainer = cookies, UseCookies = true }) { BaseAddress = this.Client.BaseAddress };
+
+    public Task<string> AntiforgeryAsync() => this.AntiforgeryAsync(this.Client);
+
+    public async Task<string> AntiforgeryAsync(HttpClient client)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, "/auth/session/csrf");
         request.Headers.TryAddWithoutValidation("Origin", this.Origin);
-        var response = await this.Client.SendAsync(request);
+        var response = await client.SendAsync(request);
         response.EnsureSuccessStatusCode();
         var document = await response.Content.ReadFromJsonAsync<JsonElement>();
         return document.GetProperty("token").GetString() ?? "";

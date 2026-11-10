@@ -4,9 +4,26 @@
 // touch browser web storage. Web Locks serialize tabs in this browser. Without
 // navigator.locks, only this tab is serialized; other tabs then depend on GoTrue's
 // refresh-token reuse window, which is a mitigation, not a proof.
+// A BroadcastChannel carries only { type: "signed-out" }. It never carries a token.
 (function () {
   let memory = null;
   let queue = Promise.resolve();
+  let signOutRef = null;
+  const channel = typeof BroadcastChannel === "function" ? new BroadcastChannel("sb-cookie-session-signal") : null;
+
+  function notifySignedOut() {
+    memory = null;
+    if (channel) channel.postMessage({ type: "signed-out" });
+  }
+
+  if (channel) {
+    channel.onmessage = function (event) {
+      var data = event.data;
+      if (!data || data.type !== "signed-out") return;
+      memory = null;
+      if (signOutRef) signOutRef.invokeMethodAsync("OnRemoteSignOut");
+    };
+  }
 
   function csrf() {
     const meta = document.querySelector('meta[name="csrf-token"]');
@@ -93,10 +110,13 @@
         return post("/auth/session/signin", { email: email, password: password });
       });
     },
+    notifySignedOut: notifySignedOut,
+    watchSignOut: function (dotNetRef) { signOutRef = dotNetRef; },
     signOut: function (accessToken) {
       return withLock(async function () {
         memory = null;
         await post("/auth/session/signout", {}, accessToken);
+        notifySignedOut();
         return { ok: true, status: 204 };
       });
     }

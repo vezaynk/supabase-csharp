@@ -16,6 +16,9 @@ public sealed class BrowserCookieSession : ICookieSession, IAsyncDisposable
     private readonly MemoryAccessTokenStore store;
     private readonly SemaphoreSlim gate = new(1, 1);
     private SupabaseMemoryClient? sdk;
+    private DotNetObjectReference<BrowserCookieSession>? signOutCallback;
+
+    public event Action? SessionEnded;
 
     public BrowserCookieSession(IJSRuntime js, SupabaseMemoryOptions configured, MemoryAccessTokenStore store)
     {
@@ -77,6 +80,23 @@ public sealed class BrowserCookieSession : ICookieSession, IAsyncDisposable
         return await client.SubscribeAsync(topic, onEvent, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task WatchSignOutAsync()
+    {
+        if (this.signOutCallback is not null)
+            return;
+        this.signOutCallback = DotNetObjectReference.Create(this);
+        await this.js.InvokeVoidAsync("cookieSession.watchSignOut", this.signOutCallback).ConfigureAwait(false);
+    }
+
+    /// <summary>Other tabs broadcast a sign-out with no token. Drop memory and the socket.</summary>
+    [JSInvokable]
+    public void OnRemoteSignOut()
+    {
+        this.store.Clear();
+        this.sdk?.Stop();
+        this.SessionEnded?.Invoke();
+    }
+
     /// <summary>Installs an access token that was redeemed on this HTTP request. Used by static SSR.</summary>
     public Task InstallAsync(string accessToken, SessionProfile profile, CancellationToken cancellationToken = default)
     {
@@ -85,11 +105,12 @@ public sealed class BrowserCookieSession : ICookieSession, IAsyncDisposable
         return Task.CompletedTask;
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
+        this.signOutCallback?.Dispose();
+        this.signOutCallback = null;
         if (this.sdk is not null)
-            return this.sdk.DisposeAsync();
-        return ValueTask.CompletedTask;
+            await this.sdk.DisposeAsync().ConfigureAwait(false);
     }
 
     private bool HasFreshToken()

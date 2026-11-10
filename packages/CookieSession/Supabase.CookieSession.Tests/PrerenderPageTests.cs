@@ -207,6 +207,55 @@ public class PrerenderPageTests
         b.Should().NotContain("seed-note-a").And.NotContain("a@example.test");
     }
 
+    [TestMethod]
+    public async Task StaticSignOut_ShouldClearTheCookieAndRenderTheSignedOutPage()
+    {
+        using var client = this.Client();
+        await this.SignInAsync(client, "a@example.test");
+        var html = await (await client.GetAsync("/static")).Content.ReadAsStringAsync();
+        var token = System.Text.RegularExpressions.Regex.Match(html, "name=\"__RequestVerificationToken\" value=\"([^\"]+)\"").Groups[1].Value;
+        token.Should().NotBeNullOrEmpty();
+
+        var request = new HttpRequestMessage(HttpMethod.Post, "/auth/session/signout")
+        {
+            Content = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["__RequestVerificationToken"] = token,
+                ["returnUrl"] = "/static",
+            }),
+        };
+        request.Headers.TryAddWithoutValidation("Origin", client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+        var response = await client.SendAsync(request);
+        response.StatusCode.Should().Be(HttpStatusCode.Redirect);
+        response.Headers.Location!.ToString().Should().Be("/static");
+        string.Join("\n", response.Headers.GetValues("Set-Cookie")).ToLowerInvariant().Should().Contain("sb-refresh");
+
+        var page = await client.GetAsync("/static");
+        var signedOut = await page.Content.ReadAsStringAsync();
+        signedOut.Should().Contain("Sign in");
+        signedOut.Should().NotContain("a@example.test");
+    }
+
+    [TestMethod]
+    public async Task StaticSignOut_ShouldIgnoreAnOffSiteReturnUrl()
+    {
+        using var client = this.Client();
+        await this.SignInAsync(client, "a@example.test");
+        var html = await (await client.GetAsync("/static")).Content.ReadAsStringAsync();
+        var token = System.Text.RegularExpressions.Regex.Match(html, "name=\"__RequestVerificationToken\" value=\"([^\"]+)\"").Groups[1].Value;
+        var request = new HttpRequestMessage(HttpMethod.Post, "/auth/session/signout")
+        {
+            Content = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["__RequestVerificationToken"] = token,
+                ["returnUrl"] = "https://evil.example/phish",
+            }),
+        };
+        request.Headers.TryAddWithoutValidation("Origin", client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+        var response = await client.SendAsync(request);
+        response.Headers.Location!.ToString().Should().Be("/");
+    }
+
     private async Task AssertAuthenticatedPageAsync(string path)
     {
         using var client = this.Client();

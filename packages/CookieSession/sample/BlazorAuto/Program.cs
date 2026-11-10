@@ -3,6 +3,7 @@ using System.Text.Json;
 using BlazorAuto.Components;
 using Microsoft.AspNetCore.Components.Infrastructure;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.HttpOverrides;
 using Supabase.CookieSession;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -22,7 +23,11 @@ builder.Services.AddCookieSession(options =>
         options.SupabaseUrl = url;
     if (!string.IsNullOrWhiteSpace(key))
         options.AnonKey = key;
+    // HTTP localhost may omit Secure. Every other environment keeps the default.
+    if (!builder.Environment.IsDevelopment())
+        options.SecureCookies = true;
 });
+builder.Services.Configure<ForwardedHeadersOptions>(options => options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost);
 builder.Services.AddAntiforgery();
 builder.Services.AddSupplyValueFromPersistentComponentStateProvider();
 builder.Services.AddRazorComponents()
@@ -30,6 +35,9 @@ builder.Services.AddRazorComponents()
     .AddInteractiveWebAssemblyComponents();
 
 var app = builder.Build();
+
+// Trust forwarded proto and host from a loopback terminator. A remote proxy must be added to KnownProxies.
+app.UseForwardedHeaders();
 
 if (app.Environment.IsDevelopment())
     app.UseWebAssemblyDebugging();
