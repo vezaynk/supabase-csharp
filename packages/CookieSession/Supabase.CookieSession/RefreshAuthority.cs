@@ -56,6 +56,10 @@ public sealed class RefreshAuthority
                 return recent.Grant;
             }
 
+            var newer = this.NewerThan(presented);
+            if (newer is not null)
+                return await this.ReuseAsync(newer, write, cancellationToken).ConfigureAwait(false);
+
             IssuedTokens issued;
             try
             {
@@ -74,7 +78,12 @@ public sealed class RefreshAuthority
             var grant = issued.ToGrant();
             var result = await write(next, cancellationToken).ConfigureAwait(false);
             if (result == CookieWriteResult.Rejected)
+            {
+                var current = this.NewerThan(presented);
+                if (current is not null)
+                    return await this.ReuseAsync(current, write, cancellationToken).ConfigureAwait(false);
                 throw new CookieSessionException("The rotated refresh cookie was not stored. Sign in again.", reauthenticate: true);
+            }
 
             lock (this.registryGate)
                 this.flights[key] = new Flight(next, grant, this.Clock().Add(this.options.SingleFlightTtl));
@@ -118,6 +127,34 @@ public sealed class RefreshAuthority
             foreach (var key in this.flights.Where(pair => pair.Value.ExpiresAt <= now).Select(pair => pair.Key).ToArray())
                 this.flights.Remove(key);
         }
+    }
+
+    private Flight? NewerThan(RefreshCookie presented)
+    {
+        var now = this.Clock();
+        lock (this.registryGate)
+        {
+            Flight? best = null;
+            foreach (var flight in this.flights.Values)
+            {
+                if (!string.Equals(flight.Cookie.SessionId, presented.SessionId, StringComparison.Ordinal))
+                    continue;
+                if (flight.ExpiresAt <= now || flight.Cookie.Generation <= presented.Generation)
+                    continue;
+                if (best is null || flight.Cookie.Generation > best.Cookie.Generation)
+                    best = flight;
+            }
+
+            return best;
+        }
+    }
+
+    private async Task<AccessGrant> ReuseAsync(Flight newer, Func<RefreshCookie, CancellationToken, Task<CookieWriteResult>> write, CancellationToken cancellationToken)
+    {
+        var wrote = await write(newer.Cookie, cancellationToken).ConfigureAwait(false);
+        if (wrote == CookieWriteResult.Rejected)
+            throw new CookieSessionException("A newer refresh cookie is already stored.", reauthenticate: false);
+        return newer.Grant;
     }
 
     private static string FlightKey(RefreshCookie cookie) => cookie.SessionId + ":" + cookie.Generation;

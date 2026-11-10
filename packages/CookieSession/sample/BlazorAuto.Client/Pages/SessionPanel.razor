@@ -64,15 +64,28 @@ else
         try
         {
             await this.Session.EnsureAsync();
-            if (this.Session.Profile is not null)
-                this.notes.AddRange(await this.Session.GetNotesAsync());
         }
         catch (CookieSessionException ex) when (ex.Reauthenticate)
         {
             this.error = null;
+            return;
         }
         catch (CookieSessionException ex)
         {
+            this.error = ex.Message;
+            return;
+        }
+
+        if (this.Session.Profile is null)
+            return;
+
+        try
+        {
+            this.notes.AddRange(await this.Session.GetNotesAsync());
+        }
+        catch (Exception ex)
+        {
+            // A data call is not a sign-out. The profile stays on the page.
             this.error = ex.Message;
         }
 

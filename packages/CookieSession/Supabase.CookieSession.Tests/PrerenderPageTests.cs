@@ -155,6 +155,19 @@ public class PrerenderPageTests
     }
 
     [TestMethod]
+    public async Task TokenFailure_ShouldKeepItsStatus_GivenTheSampleStatusPagePipeline()
+    {
+        using var client = this.Client();
+        var request = new HttpRequestMessage(HttpMethod.Post, "/auth/session/token");
+        request.Content = JsonContent.Create(new { });
+        var response = await client.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+
+        response.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        body.Should().NotContain("incorrect Content-type");
+    }
+
+    [TestMethod]
     public async Task Token_ShouldRedeemTheRotatedCookie_GivenThePrerenderResponseUpdatedIt()
     {
         using var client = this.Client();

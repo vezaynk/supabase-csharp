@@ -34,7 +34,12 @@ if (app.Environment.IsDevelopment())
 else
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
 
-app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
+// Re-executing /not-found keeps the original POST and its JSON content type. The Razor
+// endpoint then answers 400 "The request has an incorrect Content-type." and hides the
+// real /auth status, which the browser reports as "token request failed".
+app.UseWhen(
+    http => !http.Request.Path.StartsWithSegments("/auth"),
+    branch => branch.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true));
 app.UseAntiforgery();
 app.UsePrerenderSession();
 app.MapCookieSessionEndpoints();

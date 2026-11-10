@@ -72,6 +72,27 @@ public class RefreshAuthorityTests
     }
 
     [TestMethod]
+    public async Task Redeem_ShouldReturnTheNewerGrantWithoutCallingGoTrue_GivenAnOlderGenerationWithinTheSingleFlightTtl()
+    {
+        var auth = new Support.FakeAuth();
+        var authority = new RefreshAuthority(auth, new CookieSessionOptions { SingleFlightTtl = TimeSpan.FromSeconds(10) });
+        auth.Next = this.Tokens("access-new", "refresh-new", "user-a");
+        await authority.RedeemAsync(this.Cookie("session-a", 4, "refresh-4"), (_, _) => Task.FromResult(CookieWriteResult.Written), CancellationToken.None);
+        auth.Next = this.Tokens("access-should-not-issue", "refresh-should-not-issue", "user-a");
+        var writes = new List<RefreshCookie>();
+
+        var grant = await authority.RedeemAsync(this.Cookie("session-a", 2, "refresh-2"), (cookie, _) =>
+        {
+            writes.Add(cookie);
+            return Task.FromResult(CookieWriteResult.Written);
+        }, CancellationToken.None);
+
+        auth.RefreshCalls.Should().Be(1);
+        grant.AccessToken.Should().Be("access-new");
+        writes.Should().ContainSingle(cookie => cookie.Generation == 5 && cookie.RefreshToken == "refresh-new");
+    }
+
+    [TestMethod]
     public async Task Redeem_ShouldFailClosed_GivenTheCookieWriteIsRejected()
     {
         var authority = new RefreshAuthority(new Support.FakeAuth(), new CookieSessionOptions());

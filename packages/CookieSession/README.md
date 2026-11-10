@@ -41,10 +41,12 @@ One browser tab-set uses `navigator.locks.request("sb-cookie-session")` around s
 
 Inside one process, `RefreshAuthority` holds a gate per session id. Waiters for the same generation share one GoTrue call and write the same next cookie. The jar refuses an older generation, and refuses a different refresh token at the same generation. A rejected redeem deletes the cookie only when this process has not already published a newer generation.
 
+While that single-flight entry is still alive, a request that presents an older generation of the same session does not call GoTrue and does not sign the user out. The response is the newer access token, and `Set-Cookie` repeats the newer refresh cookie. Two tabs that overlap a rotation therefore keep the session.
+
 What this does not prevent:
 
 - Two servers can both redeem the cookie they were given. Supabase's refresh-token reuse window may return the same new pair to the second call. Outside that window one call gets a rejection. The generation guard is per process, so the other server can still `Set-Cookie` a conflicting token. This is not a distributed lock.
-- After the 10 second single-flight memory expires, a request that still presents the old cookie calls GoTrue again.
+- After the 10 second single-flight memory expires, a request that still presents the old cookie calls GoTrue again. If that call rotates the token and this process has already moved on, the write is rejected and the user must sign in again.
 - Logout clears the cookie and stops local sockets. GoTrue logout is best-effort. An access JWT that was already issued keeps working until it expires.
 - XSS can call the token endpoint. The browser will attach the HttpOnly cookie, and the response contains a fresh access token. HttpOnly stops script from reading the refresh token. It does not stop script from acting as the signed-in user.
 
@@ -121,7 +123,7 @@ Command:
 dotnet test packages/CookieSession/Supabase.CookieSession.Tests/Supabase.CookieSession.Tests.csproj
 ```
 
-This run: **35 passed, 0 failed** (Release, net10.0). No test called a live Supabase project. `LiveSupabase_IsOptInAndWasNotRun` returns immediately unless `COOKIE_SESSION_LIVE_URL` is set, and even then it does not dial out.
+This run: **38 passed, 0 failed** (Release, net10.0), including the headless Chrome test below. No test called a live Supabase project. `LiveSupabase_IsOptInAndWasNotRun` returns immediately unless `COOKIE_SESSION_LIVE_URL` is set, and even then it does not dial out. Docker and the Supabase CLI are not installed here, so nothing ran `supabase start`.
 
 Covered with fakes and the real SDK client:
 
@@ -135,11 +137,29 @@ Covered with fakes and the real SDK client:
 - Postgrest `Get` sends `Authorization: Bearer <user access token>` and `apikey` set to the publishable key.
 - The JS file uses Web Locks and does not reference `localStorage`, `sessionStorage`, or `indexedDB`.
 - Sample prerender against an in-process fake GoTrue and PostgREST: `GET /` (InteractiveAuto), `GET /server` (InteractiveServer), and `GET /static` with a real encrypted refresh cookie return the user email and `seed-note-a`, one refresh call, one notes call with that user's access token, and an HttpOnly `Set-Cookie` that does not contain the refresh token. Anonymous HTML is the sign-in form and does not call GoTrue. A corrupt cookie and a rejected refresh render the sign-in form and clear the cookie. A transient refresh failure leaves the cookie in place. A later `POST /auth/session/token` redeems the rotated cookie. Two browsers do not see each other's notes. A response that has already started does not rotate.
+- A failed `POST /auth/session/token` keeps its own status. The sample's status-code page does not re-execute `/auth`, so a missing `Origin` stays HTTP 403 and the body is not the Razor sentence `The request has an incorrect Content-type.`
+- An older cookie generation inside the single-flight TTL is answered with the newer grant and does not call GoTrue again.
 
-Headless Chrome, same fake, not a live Supabase project: after sign-in, loading `/` and `/server` showed `a@example.test` and `seed-note-a` once the Blazor circuit was interactive (`sdk-server-websocket`, WebSocket to `/_blazor`). A clean Auto load stayed on that server circuit for 12 seconds; `/auth/session/token` during that load returned 200. A later load reached `sdk-browser-websocket` and then showed `token request failed`. That WASM handoff was not a clean success. Native Supabase Realtime from the browser was not opened.
+`BrowserProtocolTests` starts `ProtocolHost` (see the limits below), the sample, and headless Chrome. It is part of the command above. On this machine it passed twice. What that run checked:
+
+- Signed-in `/static` HTML, from the document response, contains `a@example.test` and `seed-note-a`.
+- First Auto visit is Interactive Server (`sdk-server-websocket`) and shows that note.
+- After Blazor has cached its resource hash, the next load is WASM (`sdk-browser-websocket`). Every `POST /auth/session/token` in that load is HTTP 200. The page shows the profile and the note, not `token request failed`.
+- `/server` does the same with the server circuit, and its token calls are HTTP 200.
+- Subscribe opens a real WebSocket to the protocol host at `/realtime/v1/websocket` (not to the sample). DevTools shows the browser SDK sending `phx_join`. The host records a separate join with no `Origin` header, which is the server `ClientWebSocket`.
+- The host pushes `note-created`. The WASM page shows it.
+- Rotate sends an `access_token` frame with a new synthetic JWT on each socket. Closing that socket makes the SDK join again with that same latest token, for both the browser socket and the server socket.
+- A second Chrome profile signed in as `b@example.test` sees `seed-note-b` and not user A's note, while A's tabs still show `seed-note-a`.
+- Clicking Rotate on the WASM tab and the server tab together leaves both on user A. Sign-out returns A's form and leaves B signed in.
+
+`ProtocolHost` is not Supabase. It speaks the three shapes this SDK uses: GoTrue's password and refresh JSON, a PostgREST `GET /rest/v1/notes` with CORS, and the JSON object frames this Realtime client writes (`topic`, `event`, `payload`, `ref`). It does not prove Elixir Phoenix array frames, realtime-js, RLS, or GoTrue single-use revocation. Every refresh token the host has issued stays valid, which is wider than GoTrue's reuse interval. Access tokens are synthetic strings such as `access-user-a-3`, not JWTs signed by GoTrue.
+
+The WASM failure this replaced was two stacked bugs, both visible in headless Chrome against the earlier fake:
+
+- `UseStatusCodePagesWithReExecute("/not-found")` kept the original POST and `application/json` body. The Razor endpoint answered `400` with `The request has an incorrect Content-type.` `cookie-session.js` reports any non-401 as `token request failed`, so a real 401 or 403 from `/auth/session/token` was hidden. `/auth` is now outside that re-execute.
+- `OnInitializedAsync` loaded notes before the profile render was committed. A browser notes call that failed (the old fake sent no CORS headers, so WASM's PostgREST `fetch` threw) aborted the component and left the sign-in form on screen even after the token POST had returned 200. A notes failure now stays an error under the signed-in profile.
 
 Not run:
 
-- A browser tab actually speaking Phoenix to Supabase Realtime.
 - Two OS processes redeeming one cookie.
-- A real local `supabase start` stack. Docker was not required for the prototype, and no credentials were available.
+- A real local `supabase start` stack. Docker and the Supabase CLI are not installed, and no project credentials were used.
